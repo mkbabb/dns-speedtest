@@ -9,6 +9,9 @@ readme = "README.md"
 python = "^3.12"
 loguru = "^0.7.2"
 dnslib = "^0.9.25"
+sqlalchemy = "^2.0.32"
+mysql-connector-python = "^9.0.0"
+toml = "^0.10.2"
 
 
 [tool.poetry.group.dev.dependencies]
