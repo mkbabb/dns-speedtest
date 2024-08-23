@@ -2,7 +2,7 @@ import time
 from datetime import datetime
 from typing import override
 
-from dnslib import NS, QTYPE, RR, TXT, DNSRecord
+from dnslib import A, NS, QTYPE, RR, TXT, DNSRecord
 from dnslib.server import BaseResolver
 import ipinfo.details
 from loguru import logger
@@ -160,6 +160,7 @@ class SpeedTestResolver(BaseResolver):
             return self.handle_txt_or_a_query(
                 request=request,
                 qname=qname,
+                qtype=qtype,
                 byte_len=handler.dns_url.byte_len,
             )
         else:
@@ -182,8 +183,15 @@ class SpeedTestResolver(BaseResolver):
 
         return reply
 
-    def handle_txt_or_a_query(self, request: DNSRecord, qname: str, byte_len: int):
+    def handle_txt_or_a_query(self, request: DNSRecord, qname: str, qtype: str, byte_len: int):
         reply = request.reply()
+
+        RecordClass = TXT
+        rtype = QTYPE.TXT
+
+        if qtype == "A":
+            RecordClass = A
+            rtype = QTYPE.A
 
         num_chunks = byte_len // MAX_TXT_CHUNK_SIZE
         chunks = self.chunk_cache.get_random_chunks(num_chunks)
@@ -193,7 +201,7 @@ class SpeedTestResolver(BaseResolver):
                 RR(rname=qname, rtype=QTYPE.TXT, rclass=1, ttl=0, rdata=TXT(chunk))
             )
 
-        logger.info(f"Resolved TXT query for {qname} with {byte_len} bytes")
+        logger.info(f"Resolved {qname} query with {byte_len} bytes")
 
         return reply
 
