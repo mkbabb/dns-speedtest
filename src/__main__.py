@@ -10,6 +10,7 @@ from src.models import Base
 from src.constants import CACHE_SIZE, DEFAULT_PORT
 from src.server.speedtest import run_server
 from src.utils import RECORD_SIZE
+import ipinfo
 
 
 def load_config(config_file: Path) -> dict:
@@ -25,6 +26,7 @@ def load_config(config_file: Path) -> dict:
 
 def create_db_engine(config: dict) -> URL:
     db_config = config['mysql']
+
     url = URL.create(
         "mysql+mysqlconnector",
         username=db_config['username'],
@@ -33,6 +35,7 @@ def create_db_engine(config: dict) -> URL:
         port=int(db_config['port']),
         database=db_config['database'],
     )
+
     return create_engine(url)
 
 
@@ -69,6 +72,8 @@ def main() -> None:
     # Create tables
     Base.metadata.create_all(engine)
 
+    ipinfo_handler = ipinfo.getHandler(config['ipinfo']['token'])
+
     logger.info(
         f"Starting DNS Speed Test Server with fixed record size: {RECORD_SIZE} bytes"
     )
@@ -77,6 +82,7 @@ def main() -> None:
         port=args.port,
         cache_size=CACHE_SIZE,
         engine=engine,
+        ipinfo_handler=ipinfo_handler,
     )
 
 

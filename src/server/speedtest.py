@@ -4,9 +4,11 @@ from typing import override
 
 from dnslib import NS, QTYPE, RR, TXT, DNSRecord
 from dnslib.server import BaseResolver
+import ipinfo.details
 from loguru import logger
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
+import ipinfo
 
 from src.constants import (
     DEFAULT_ADDRESS,
@@ -14,7 +16,7 @@ from src.constants import (
     MAX_TXT_CHUNK_SIZE,
     NS_RECORD_NAME,
 )
-from src.models import DNSUrlsTable, RequestsTable, SpeedtestResultsTable
+from src.models import DNSUrlsTable, IPInfoTable, RequestsTable, SpeedtestResultsTable
 from src.server.dns import BaseResolver, DNSHandler, DNSServer
 from src.utils import ChunkCache, DNSUrl, calc_speed
 
@@ -66,6 +68,7 @@ class SpeedtestDNSHandler(DNSHandler):
             )
 
             session.add(request_table_obj)
+
             session.commit()
 
             self.request_id = request_table_obj.id
@@ -73,6 +76,30 @@ class SpeedtestDNSHandler(DNSHandler):
             logger.info(
                 f"Logged DNS request: {qtype} from {ip} for {self.dns_url.domain}"
             )
+
+            try:
+                details: ipinfo.details.Details = self.server.ipinfo_handler.getDetails(
+                    ip
+                )
+                details = details.all
+
+                if details.get("bogon"):
+                    raise Exception("Bogon IP address")
+
+                ipinfo_table_obj = IPInfoTable(
+                    ip_address=details["ip"],
+                    location=details["loc"],
+                    org=details["org"],
+                    postal=details["postal"],
+                    city=details["city"],
+                    region=details["region"],
+                    country=details["country"],
+                )
+                request_table_obj.ipinfo = ipinfo_table_obj
+
+                session.commit()
+            except Exception as e:
+                logger.error(f"Error getting IP info: {e}")
 
         return super().get_reply(data)
 
@@ -184,6 +211,7 @@ class SpeedtestDNSServer(DNSServer):
     def __init__(
         self,
         engine: Engine,
+        ipinfo_handler: ipinfo.handler.Handler,
         cache_size: int,
         address: str = "",
         port: int = DEFAULT_PORT,
@@ -208,15 +236,18 @@ class SpeedtestDNSServer(DNSServer):
 
         self.engine = engine
         self.server.engine = engine
+        self.server.ipinfo_handler = ipinfo_handler
 
 
 def run_server(
     port: int,
     cache_size: int,
     engine: Engine,
+    ipinfo_handler: ipinfo.handler.Handler,
 ) -> None:
     udp_server = SpeedtestDNSServer(
         engine=engine,
+        ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
         address=DEFAULT_ADDRESS,
@@ -225,6 +256,7 @@ def run_server(
 
     tcp_server = SpeedtestDNSServer(
         engine=engine,
+        ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
         address=DEFAULT_ADDRESS,

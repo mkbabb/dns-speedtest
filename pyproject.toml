@@ -12,6 +12,8 @@ dnslib = "^0.9.25"
 sqlalchemy = "^2.0.32"
 mysql-connector-python = "^9.0.0"
 toml = "^0.10.2"
+ipinfo = "^5.0.1"
+googleapiutils2 = "^0.14.2"
 
 
 [tool.poetry.group.dev.dependencies]
