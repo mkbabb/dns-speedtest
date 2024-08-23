@@ -6,9 +6,9 @@ import toml
 from loguru import logger
 from sqlalchemy import URL, create_engine
 
-from models import Base
+from src.models import Base
 from src.constants import CACHE_SIZE, DEFAULT_PORT
-from src.server import run_server
+from src.server.speedtest import run_server
 from src.utils import RECORD_SIZE
 
 
@@ -75,8 +75,8 @@ def main() -> None:
 
     run_server(
         port=args.port,
-        engine=engine,
         cache_size=CACHE_SIZE,
+        engine=engine,
     )
 
 

@@ -12,7 +12,7 @@ class DNSUrlsTable(Base):
     __tablename__ = "dns_urls"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    byte_amount: Mapped[int] = mapped_column(Integer)
+    byte_len: Mapped[int] = mapped_column(Integer)
     uid: Mapped[str] = mapped_column(Text)
     domain: Mapped[str] = mapped_column(Text)
 

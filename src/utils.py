@@ -26,15 +26,15 @@ def clamp(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(value, max_value))
 
 
-def calc_speed(delta: float, byte_amount: int) -> float:
+def calc_speed(delta: float, byte_len: int) -> float:
     """Calculate the download speed in MB/s.
 
     Args:
         delta (float): The time delta in nanoseconds
-        byte_amount (int): The amount of bytes downloaded
+        byte_len (int): The amount of bytes downloaded
     """
 
-    return byte_amount / delta * 1e9 / 2**20
+    return byte_len / delta * 1e9 / 2**20
 
 
 @dataclass
@@ -42,9 +42,9 @@ class DNSUrl:
     """
     EBNF Grammar for a DNS URL:
 
-    url           = byte_amount?, uid?, domain
+    url           = byte_len?, uid?, domain
 
-    byte_amount   = digit+, "_"
+    byte_len   = digit+, "_"
 
     uid           = \w+, "_"
 
@@ -56,7 +56,7 @@ class DNSUrl:
     """
 
     # The amount of bytes to download
-    byte_amount: int
+    byte_len: int
     # The unique identifier
     uid: str
     # The domain to download from
@@ -75,19 +75,19 @@ class DNSUrl:
         if not match:
             raise ValueError("Invalid DNS URL format")
 
-        byte_amount, uid, domain = match.groups()
+        byte_len, uid, domain = match.groups()
 
-        if byte_amount:
+        if byte_len:
             try:
-                byte_amount = clamp(int(byte_amount[:-1]), 1, RECORD_SIZE)
+                byte_len = clamp(int(byte_len[:-1]), 1, RECORD_SIZE)
             except ValueError:
-                byte_amount = RECORD_SIZE
+                byte_len = RECORD_SIZE
         else:
-            byte_amount = RECORD_SIZE
+            byte_len = RECORD_SIZE
 
         if uid:
             uid = uid[:-1]
         else:
             uid = ""
 
-        return DNSUrl(byte_amount=byte_amount, uid=uid, domain=domain)
+        return DNSUrl(byte_len=byte_len, uid=uid, domain=domain)
