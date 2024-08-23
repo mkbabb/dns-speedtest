@@ -17,3 +17,6 @@ MAX_TXT_CHUNK_SIZE = 255
 
 # The name of the NS record(s) for the DNS server
 NS_RECORD_NAME = "ns-1.friday.institute."
+
+# Default filepath whereof to read for the random chunks
+DEFAULT_CHUNK_FILEPATH = "./data/canto-5.txt"

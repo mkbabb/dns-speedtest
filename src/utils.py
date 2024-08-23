@@ -2,23 +2,53 @@ import random
 import re
 import string
 from dataclasses import dataclass
-
-from src.constants import RECORD_SIZE
+from pathlib import Path
+from src.constants import RECORD_SIZE, DEFAULT_CHUNK_FILEPATH
 
 
 class ChunkCache:
-    def __init__(self, cache_size: int, chunk_size: int):
-        self.chunks = self._generate_random_chunks(cache_size, chunk_size)
+    def __init__(
+        self, cache_size: int, chunk_size: int, file_path: str | Path | None = DEFAULT_CHUNK_FILEPATH
+    ):
+        self.cache_size = cache_size
+        self.chunk_size = chunk_size
+
+        self.file_path = Path(file_path) if file_path is not None else None
+        
+        if self.file_path is not None:
+            self.chunks = self.read_and_chunk_file()
+        else:
+            self.chunks = self.generate_random_chunks()
 
     def get_random_chunks(self, num_chunks: int) -> list[str]:
+        num_chunks = clamp(num_chunks, 1, len(self.chunks))
         start = random.randint(0, len(self.chunks) - num_chunks)
         return self.chunks[start : start + num_chunks]
 
-    @staticmethod
-    def _generate_random_chunks(size: int, chunk_size: int) -> list[str]:
+    def read_and_chunk_file(self) -> list[str]:
+        """Read the file and split it into chunks of specified size."""
+        try:
+            content = self.file_path.read_bytes()
+            return [
+                content[i : i + self.chunk_size]
+                for i in range(0, len(content), self.chunk_size)
+            ]
+        except FileNotFoundError:
+            print(f"Error: File not found at {self.file_path}")
+            return []
+        except IOError:
+            print(f"Error: Could not read file at {self.file_path}")
+            return []
+
+    def generate_random_chunks(self) -> list[str]:
         """Generate random chunks of specified size."""
-        content = ''.join(random.choices(string.ascii_letters + string.digits, k=size))
-        return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
+        content = ''.join(
+            random.choices(string.ascii_letters + string.digits, k=self.cache_size)
+        )
+        return [
+            content[i : i + self.chunk_size]
+            for i in range(0, len(content), self.chunk_size)
+        ]
 
 
 def clamp(value: int, min_value: int, max_value: int) -> int:
