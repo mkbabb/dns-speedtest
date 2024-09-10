@@ -23,6 +23,7 @@ class ChunkCache:
     def get_random_chunks(self, num_chunks: int) -> list[str]:
         num_chunks = clamp(num_chunks, 1, len(self.chunks))
         start = random.randint(0, len(self.chunks) - num_chunks)
+        
         return self.chunks[start : start + num_chunks]
 
     def read_and_chunk_file(self) -> list[str]:

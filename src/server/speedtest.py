@@ -156,8 +156,8 @@ class SpeedTestResolver(BaseResolver):
                 request=request,
                 qname=qname,
             )
-        elif qtype == 'TXT' or qtype == 'A':
-            return self.handle_txt_or_a_query(
+        elif qtype == 'TXT':
+            return self.handle_txt_query(
                 request=request,
                 qname=qname,
                 qtype=qtype,
@@ -183,20 +183,22 @@ class SpeedTestResolver(BaseResolver):
 
         return reply
 
-    def handle_txt_or_a_query(self, request: DNSRecord, qname: str, qtype: str, byte_len: int):
+    def handle_txt_query(
+        self, request: DNSRecord, qname: str, qtype: str, byte_len: int
+    ):
         reply = request.reply()
-
-        RecordClass = TXT
-        rtype = QTYPE.TXT
-
-        if qtype == "A":
-            RecordClass = A
-            rtype = QTYPE.A
 
         num_chunks = byte_len // MAX_TXT_CHUNK_SIZE
         chunks = self.chunk_cache.get_random_chunks(num_chunks)
 
+        remaining_bytes = byte_len
+
         for chunk in chunks:
+            if remaining_bytes < MAX_TXT_CHUNK_SIZE:
+                chunk = chunk[:remaining_bytes]
+
+            remaining_bytes -= len(chunk)
+
             reply.add_answer(
                 RR(rname=qname, rtype=QTYPE.TXT, rclass=1, ttl=0, rdata=TXT(chunk))
             )

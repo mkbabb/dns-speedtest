@@ -10,42 +10,91 @@ from loguru import logger
 
 from src.constants import DEFAULT_PORT, RECV_BUFFER_SIZE
 
+from __future__ import annotations
+
+import socket
+import socketserver
+import struct
+import time
+from typing import Any
+
+from dnslib import DNSRecord
+from dnslib.server import BaseResolver, DNSError
+from loguru import logger
+
+from src.constants import DEFAULT_PORT, RECV_BUFFER_SIZE
+
 
 class DNSHandler(socketserver.BaseRequestHandler):
-    def __init__(self, *args, **kwargs):
+    udplen: int
+    server: socketserver.BaseServer
+    request: socket.socket | tuple[bytes, socket.socket]
+    client_address: tuple[str, int]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.udplen = 0
         super().__init__(*args, **kwargs)
 
-    def handle(self):
-        start_time = time.perf_counter_ns()
+    def handle(self) -> None:
         if self.server.socket_type == socket.SOCK_STREAM:
-            self.protocol = 'tcp'
-            data = self.receive_tcp_data()
+            self.handle_tcp()
         else:
-            self.protocol = 'udp'
-            data, connection = self.request
+            self.handle_udp()
 
-        self.on_recieve(data=data, delta=time.perf_counter_ns() - start_time)
+    def handle_tcp(self) -> None:
+        receive_start_time = time.perf_counter_ns()
+
+        data = self.receive_tcp_data()
+
+        receive_end_time = time.perf_counter_ns()
+        receive_delta = receive_end_time - receive_start_time
+
+        if data is not None:
+            self.on_receive(data=data, delta=receive_delta)
+
+            try:
+                rdata = self.get_reply(data)
+
+                send_start_time = time.perf_counter_ns()
+
+                self.send_tcp_reply(rdata)
+
+                self.graceful_shutdown()
+
+                send_end_time = time.perf_counter_ns()
+                send_delta = send_end_time - send_start_time
+
+                self.on_send(data=rdata, delta=send_delta)
+            except DNSError as e:
+                logger.error(f"DNS Error: {e}")
+
+    def handle_udp(self) -> None:
+        receive_start_time = time.perf_counter_ns()
+
+        data, connection = self.request  # type: ignore
+
+        receive_end_time = time.perf_counter_ns()
+        receive_delta = receive_end_time - receive_start_time
+
+        self.on_receive(data=data, delta=receive_delta)
 
         try:
             rdata = self.get_reply(data)
 
-            start_time = time.perf_counter_ns()
+            send_start_time = time.perf_counter_ns()
 
-            if self.protocol == 'tcp':
-                self.send_tcp_reply(rdata)
-            else:
-                self.send_udp_reply(rdata, connection)
+            self.send_udp_reply(rdata, connection)
 
-            self.on_send(data=rdata, delta=time.perf_counter_ns() - start_time)
+            send_end_time = time.perf_counter_ns()
+            send_delta = send_end_time - send_start_time
 
+            self.on_send(data=rdata, delta=send_delta)
         except DNSError as e:
             logger.error(f"DNS Error: {e}")
 
-    def receive_tcp_data(self):
+    def receive_tcp_data(self) -> bytes | None:
         data = self.request.recv(RECV_BUFFER_SIZE)
         if len(data) < 2:
-            # self.server.logger.log_error(self, "Request Truncated")
             return None
 
         length = struct.unpack("!H", bytes(data[:2]))[0]
@@ -58,35 +107,53 @@ class DNSHandler(socketserver.BaseRequestHandler):
 
         return data[2:]
 
-    def send_tcp_reply(self, rdata):
+    def send_tcp_reply(self, rdata: bytes) -> None:
         rdata = struct.pack("!H", len(rdata)) + rdata
         self.request.sendall(rdata)
 
-    def send_udp_reply(self, rdata, connection):
+    def send_udp_reply(self, rdata: bytes, connection: socket.socket) -> None:
         connection.sendto(rdata, self.client_address)
 
-    def get_reply(self, data):
+    def get_reply(self, data: bytes) -> bytes:
         request = DNSRecord.parse(data)
-
-        resolver = self.server.resolver
+        resolver: BaseResolver = self.server.resolver  # type: ignore
         reply = resolver.resolve(request, self)
 
-        if self.protocol == 'udp':
+        if self.server.socket_type == socket.SOCK_DGRAM:
             rdata = reply.pack()
             if self.udplen and len(rdata) > self.udplen:
                 truncated_reply = reply.truncate()
                 rdata = truncated_reply.pack()
-
         else:
             rdata = reply.pack()
 
         return rdata
 
-    def on_recieve(self, data: bytes, delta: float):
-        pass
+    def on_receive(self, data: bytes, delta: float) -> None:
+        logger.info(f"Received data of length {len(data)} in {delta/1e6:.2f} ms")
 
-    def on_send(self, data: bytes, delta: float):
-        pass
+    def on_send(self, data: bytes, delta: float) -> None:
+        logger.info(f"Sent data of length {len(data)} in {delta/1e6:.2f} ms")
+
+    def graceful_shutdown(self) -> None:
+        if self.server.socket_type == socket.SOCK_STREAM:
+            try:
+                # Wait for the final ACK
+                self.request.recv(1)
+
+                # Initiate graceful shutdown
+                self.request.shutdown(socket.SHUT_WR)
+
+                # Wait for the client to close the connection
+                while True:
+                    data = self.request.recv(1)
+                    if not data:
+                        break
+
+            except socket.error as e:
+                logger.error(f"Error during graceful shutdown: {e}")
+            finally:
+                self.request.close()
 
 
 class BaseResolver(object):
