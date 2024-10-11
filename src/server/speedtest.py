@@ -4,7 +4,7 @@ from typing import override
 
 import ipinfo
 import ipinfo.details
-from dnslib import NS, QTYPE, RR, TXT, A, DNSRecord
+from dnslib import NS, QTYPE, RR, SOA, TXT, A, DNSHeader, DNSRecord
 from dnslib.server import BaseResolver
 from loguru import logger
 from sqlalchemy.engine import Engine
@@ -13,21 +13,60 @@ from sqlalchemy.orm import Session
 from src.constants import (
     DEFAULT_ADDRESS,
     DEFAULT_PORT,
+    DOMAIN_NAME,
+    EXPIRE_TIME,
     MAX_TXT_CHUNK_SIZE,
-    NS_RECORD_NAME,
+    MINIMUM_TIME,
+    RECORD_SIZE,
+    REFRESH_TIME,
+    RETRY_TIME,
+    SERIAL_NUMBER,
+    TTL,
 )
 from src.models import DNSUrlsTable, IPInfoTable, RequestsTable, SpeedtestResultsTable
 from src.server.dns import BaseResolver, DNSHandler, DNSServer
 from src.utils import ChunkCache, DNSUrl, calc_speed
 
 
+class DomainName(str):
+    def __getattr__(self, item):
+        return DomainName(item + '.' + self)
+
+    def __getitem__(self, item):
+        return DomainName(item + '.' + self)
+
+
+D = DomainName(DOMAIN_NAME)
+IP = DEFAULT_ADDRESS
+
+soa_record = SOA(
+    mname=D["ns-1"],  # primary name server
+    rname=D.admin,  # email of the domain administrator
+    times=(
+        SERIAL_NUMBER,
+        REFRESH_TIME,
+        RETRY_TIME,
+        EXPIRE_TIME,
+        MINIMUM_TIME,
+    ),
+)
+
+ns_records = [NS(D["ns-1"])]
+
+records = {
+    D: [A(IP), soa_record] + ns_records,
+    D["ns-1"]: [A(IP)],
+    D.admin: [A(IP)],
+}
+
+
 class SpeedtestDNSHandler(DNSHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.request = None
+        self.dns_record: DNSRecord = None
 
-        self.request_id: int = None
+        self.dns_record_id: int = None
 
         self.dns_url: DNSUrl = None
 
@@ -45,10 +84,10 @@ class SpeedtestDNSHandler(DNSHandler):
     def get_reply(self, data: bytes):
         logger.info(f"Received DNS request from {self.client_address}")
 
-        self.request = DNSRecord.parse(data)
+        self.dns_record = DNSRecord.parse(data)
 
-        qname = self.request.q.qname
-        qtype = QTYPE[self.request.q.qtype]
+        qname = self.dns_record.q.qname
+        qtype = QTYPE[self.dns_record.q.qtype]
 
         url = str(qname).rstrip('.')
         ip = self.client_address[0]
@@ -109,7 +148,7 @@ class SpeedtestDNSHandler(DNSHandler):
 
     @override
     def on_send(self, data: bytes, delta: float):
-        qtype = QTYPE[self.request.q.qtype]
+        qtype = QTYPE[self.dns_record.q.qtype]
 
         end_time = datetime.now()
 
@@ -151,46 +190,63 @@ class SpeedTestResolver(BaseResolver):
     def __init__(self, chunk_cache: ChunkCache):
         self.chunk_cache = chunk_cache
 
-    def resolve(self, request: DNSRecord, handler: SpeedtestDNSHandler) -> DNSRecord:
+    @override
+    def resolve(self, request: DNSRecord, handler: DNSHandler) -> DNSRecord:
         qname = request.q.qname
-        qtype = QTYPE[request.q.qtype]
+        qtype = request.q.qtype
+        qt = QTYPE[qtype]
 
-        if qtype == 'NS':
-            return self.handle_ns_query(
-                request=request,
-                qname=qname,
-            )
-        elif qtype == 'TXT':
-            return self.handle_txt_query(
-                request=request,
-                qname=qname,
-                qtype=qtype,
-                byte_len=handler.dns_url.byte_len,
-            )
-        else:
-            return self.handle_unsupported_query(request=request, qtype=qtype)
+        logger.info(f"Resolving query for {qname} with type {qt}")
 
-    def handle_ns_query(self, request: DNSRecord, qname):
-        reply = request.reply()
-
-        reply.add_answer(
-            RR(
-                rname=qname,
-                rtype=QTYPE.NS,
-                rclass=1,
-                ttl=300,
-                rdata=NS(NS_RECORD_NAME),
-            )
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
         )
 
-        logger.info(f"Resolved NS query for {qname} with NS record {NS_RECORD_NAME}")
+        if qt in ['NS', 'SOA', 'A', 'TXT']:
+            logger.info(f"***Resolving query for {qname} with type {qt}")
 
+            reply = self.handle_standard_query(reply, qname, qt)
+            if qt == 'TXT' or qt == 'A':
+                reply = self.handle_txt_query(reply, qname, handler)
+
+            return reply
+        else:
+            return self.handle_unsupported_query(reply, qt)
+
+    def handle_standard_query(self, reply: DNSRecord, qname, qt):
+        qn = str(qname)
+
+        if qn == D or qn.endswith('.' + D):
+            for name, rrs in records.items():
+                if name == qn:
+                    for rdata in rrs:
+                        rqt = rdata.__class__.__name__
+                        if qt in ['*', rqt]:
+                            reply.add_answer(
+                                RR(
+                                    rname=qname,
+                                    rtype=getattr(QTYPE, rqt),
+                                    rclass=1,
+                                    ttl=TTL,
+                                    rdata=rdata,
+                                )
+                            )
+
+            for rdata in ns_records:
+                reply.add_ar(
+                    RR(rname=D, rtype=QTYPE.NS, rclass=1, ttl=TTL, rdata=rdata)
+                )
+
+            reply.add_auth(
+                RR(rname=D, rtype=QTYPE.SOA, rclass=1, ttl=TTL, rdata=soa_record)
+            )
+
+        logger.info(f"Resolved standard query for {qname} with type {qt}")
         return reply
 
-    def handle_txt_query(
-        self, request: DNSRecord, qname: str, qtype: str, byte_len: int
-    ):
-        reply = request.reply()
+    def handle_txt_query(self, reply: DNSRecord, qname, handler: DNSHandler):
+        dns_url = handler.dns_url
+        byte_len = dns_url.byte_len
 
         num_chunks = byte_len // MAX_TXT_CHUNK_SIZE
         chunks = self.chunk_cache.get_random_chunks(num_chunks)
@@ -207,16 +263,14 @@ class SpeedTestResolver(BaseResolver):
                 RR(rname=qname, rtype=QTYPE.TXT, rclass=1, ttl=0, rdata=TXT(chunk))
             )
 
-        logger.info(f"Resolved {qname} query with {byte_len} bytes")
+        logger.info(f"Resolved TXT query for {qname} with {byte_len} bytes")
 
         return reply
 
-    def handle_unsupported_query(self, request: DNSRecord, qtype: str) -> None:
-        reply = request.reply()
-
+    def handle_unsupported_query(self, reply: DNSRecord, qt):
         reply.header.rcode = 3
 
-        logger.warning(f"Unsupported query type: {qtype}")
+        logger.warning(f"Unsupported query type: {qt}")
 
         return reply
 
@@ -264,7 +318,6 @@ def run_server(
         ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
-        address=DEFAULT_ADDRESS,
         tcp=False,
     )
 
@@ -273,7 +326,6 @@ def run_server(
         ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
-        address=DEFAULT_ADDRESS,
         tcp=True,
     )
 

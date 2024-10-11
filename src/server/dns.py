@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import select
 import socket
 import socketserver
 import struct
@@ -13,6 +14,32 @@ from loguru import logger
 
 from src.constants import DEFAULT_PORT, RECV_BUFFER_SIZE
 
+import ctypes
+import statistics
+
+# Load time.h for high-precision timing
+libc = ctypes.CDLL('libc.so.6')
+CLOCK_MONOTONIC_RAW = 4  # system-wide clock that isn't subject to NTP adjustments
+
+
+class timespec(ctypes.Structure):
+    _fields_ = [('tv_sec', ctypes.c_long), ('tv_nsec', ctypes.c_long)]
+
+
+libc.clock_gettime.argtypes = [ctypes.c_int, ctypes.POINTER(timespec)]
+
+
+def get_time_ns():
+    t = timespec()
+    libc.clock_gettime(CLOCK_MONOTONIC_RAW, ctypes.pointer(t))
+    return t.tv_sec * 1e9 + t.tv_nsec
+
+
+def measure_python_overhead():
+    start = get_time_ns()
+    end = get_time_ns()
+    return end - start
+
 
 class DNSHandler(socketserver.BaseRequestHandler):
     udplen: int
@@ -23,6 +50,7 @@ class DNSHandler(socketserver.BaseRequestHandler):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.udplen = 0
+
         super().__init__(*args, **kwargs)
 
     @override
@@ -30,10 +58,12 @@ class DNSHandler(socketserver.BaseRequestHandler):
         if self.server.socket_type == socket.SOCK_STREAM:
             logger.info(f"TCP Connection from {self.client_address}")
             self.protocol = "TCP"
+
             self.handle_tcp()
         else:
             logger.info(f"UDP Connection from {self.client_address}")
             self.protocol = "UDP"
+
             self.handle_udp()
 
     def handle_tcp(self) -> None:
@@ -44,24 +74,19 @@ class DNSHandler(socketserver.BaseRequestHandler):
         receive_end_time = time.perf_counter_ns()
         receive_delta = receive_end_time - receive_start_time
 
-        if data is not None:
-            self.on_receive(data=data, delta=receive_delta)
+        if data is None:
+            return
 
-            try:
-                rdata = self.get_reply(data)
+        self.on_receive(data=data, delta=receive_delta)
 
-                send_start_time = time.perf_counter_ns()
+        try:
+            rdata = self.get_reply(data)
 
-                self.send_tcp_reply(rdata)
+            send_delta = self.send_tcp_reply(rdata=rdata, num_runs=1)
 
-                self.graceful_shutdown()
-
-                send_end_time = time.perf_counter_ns()
-                send_delta = send_end_time - send_start_time
-
-                self.on_send(data=rdata, delta=send_delta)
-            except DNSError as e:
-                logger.error(f"DNS Error: {e}")
+            self.on_send(data=rdata, delta=send_delta)
+        except DNSError as e:
+            logger.error(f"DNS Error: {e}")
 
     def handle_udp(self) -> None:
         receive_start_time = time.perf_counter_ns()
@@ -76,12 +101,7 @@ class DNSHandler(socketserver.BaseRequestHandler):
         try:
             rdata = self.get_reply(data)
 
-            send_start_time = time.perf_counter_ns()
-
-            self.send_udp_reply(rdata, connection)
-
-            send_end_time = time.perf_counter_ns()
-            send_delta = send_end_time - send_start_time
+            send_delta = self.send_udp_reply(rdata=rdata, connection=connection)
 
             self.on_send(data=rdata, delta=send_delta)
         except DNSError as e:
@@ -89,6 +109,7 @@ class DNSHandler(socketserver.BaseRequestHandler):
 
     def receive_tcp_data(self) -> bytes | None:
         data = self.request.recv(RECV_BUFFER_SIZE)
+
         if len(data) < 2:
             return None
 
@@ -102,16 +123,67 @@ class DNSHandler(socketserver.BaseRequestHandler):
 
         return data[2:]
 
-    def send_tcp_reply(self, rdata: bytes) -> None:
+    def send_tcp_reply(self, rdata: bytes, num_runs: int = 1) -> float:
         rdata = struct.pack("!H", len(rdata)) + rdata
-        self.request.sendall(rdata)
+        self.request.setblocking(False)
 
-    def send_udp_reply(self, rdata: bytes, connection: socket.socket) -> None:
-        connection.sendto(rdata, self.client_address)
+        python_overhead = statistics.mean(measure_python_overhead() for _ in range(100))
+
+        deltas = []
+        for _ in range(num_runs):
+            send_start_time = get_time_ns()
+
+            self.request.sendall(rdata)
+
+            send_end_time = get_time_ns()
+
+            deltas.append(send_end_time - send_start_time - python_overhead)
+
+        self.request.setblocking(True)
+
+        avg_delta = statistics.mean(deltas)
+
+        speed = len(rdata) / (avg_delta / 1e9)
+
+        logger.info(
+            f"Sent data of length {len(rdata)} in {avg_delta/1e6:.2f} ms at {speed/1e6:.2f} MB/s "
+            f"(averaged over {num_runs} runs, Python overhead: {python_overhead:.2f} ns)"
+        )
+
+        return avg_delta
+
+    def send_udp_reply(
+        self, rdata: bytes, connection: socket.socket, num_runs: int = 1
+    ) -> None:
+        python_overhead = statistics.mean(measure_python_overhead() for _ in range(100))
+
+        deltas = []
+
+        for _ in range(num_runs):
+            send_start_time = get_time_ns()
+
+            connection.sendto(rdata, self.client_address)
+
+            send_end_time = get_time_ns()
+
+            deltas.append(send_end_time - send_start_time - python_overhead)
+
+        avg_delta = statistics.mean(deltas)
+
+        speed = len(rdata) / (avg_delta / 1e9)
+
+        logger.info(
+            f"Sent data of length {len(rdata)} in {avg_delta/1e6:.2f} ms at {speed/1e6:.2f} MB/s "
+            f"(averaged over {num_runs} runs, Python overhead: {python_overhead:.2f} ns)"
+        )
+
+        return avg_delta
 
     def get_reply(self, data: bytes) -> bytes:
         request = DNSRecord.parse(data)
+
         resolver: BaseResolver = self.server.resolver  # type: ignore
+
         reply = resolver.resolve(request, self)
 
         if self.server.socket_type == socket.SOCK_DGRAM:
@@ -130,26 +202,6 @@ class DNSHandler(socketserver.BaseRequestHandler):
 
     def on_send(self, data: bytes, delta: float) -> None:
         logger.info(f"Sent data of length {len(data)} in {delta/1e6:.2f} ms")
-
-    def graceful_shutdown(self) -> None:
-        if self.server.socket_type == socket.SOCK_STREAM:
-            try:
-                # Wait for the final ACK
-                self.request.recv(1)
-
-                # Initiate graceful shutdown
-                self.request.shutdown(socket.SHUT_WR)
-
-                # Wait for the client to close the connection
-                while True:
-                    data = self.request.recv(1)
-                    if not data:
-                        break
-
-            except socket.error as e:
-                logger.error(f"Error during graceful shutdown: {e}")
-            finally:
-                self.request.close()
 
 
 class BaseResolver(object):
