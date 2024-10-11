@@ -9,15 +9,15 @@ readme = "README.md"
 python = "^3.12"
 loguru = "^0.7.2"
 dnslib = "^0.9.25"
-sqlalchemy = "^2.0.32"
+sqlalchemy = "^2.0.35"
 mysql-connector-python = "^9.0.0"
 toml = "^0.10.2"
-ipinfo = "^5.0.1"
+ipinfo = "^5.1.1"
 googleapiutils2 = "^0.14.2"
 
 
 [tool.poetry.group.dev.dependencies]
-black = "^24.8.0"
+black = "^24.10.0"
 
 [build-system]
 requires = ["poetry-core"]

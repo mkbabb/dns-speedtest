@@ -26,10 +26,10 @@ class RequestsTable(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime)
     end_time: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     ip: Mapped[str] = mapped_column(Text)
-    
+
     dns_url_id: Mapped[int] = mapped_column(ForeignKey("dns_urls.id"))
     ipinfo_id: Mapped[int] = mapped_column(ForeignKey("ipinfo.id"), nullable=True)
-    
+
     dns_url: Mapped["DNSUrlsTable"] = relationship(
         "DNSUrlsTable", back_populates="request"
     )
@@ -59,7 +59,7 @@ class SpeedtestResultsTable(Base):
 class IPInfoTable(Base):
     __tablename__ = "ipinfo"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    
+
     request: Mapped[RequestsTable] = relationship(
         "RequestsTable", back_populates="ipinfo"
     )

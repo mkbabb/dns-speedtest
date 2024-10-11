@@ -2,13 +2,13 @@ import time
 from datetime import datetime
 from typing import override
 
-from dnslib import A, NS, QTYPE, RR, TXT, DNSRecord
-from dnslib.server import BaseResolver
+import ipinfo
 import ipinfo.details
+from dnslib import NS, QTYPE, RR, TXT, A, DNSRecord
+from dnslib.server import BaseResolver
 from loguru import logger
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
-import ipinfo
 
 from src.constants import (
     DEFAULT_ADDRESS,
@@ -35,12 +35,16 @@ class SpeedtestDNSHandler(DNSHandler):
 
     @override
     def handle(self):
+        logger.info(f"Handling DNS request from {self.client_address}")
+
         self.start_time = datetime.now()
 
         return super().handle()
 
     @override
     def get_reply(self, data: bytes):
+        logger.info(f"Received DNS request from {self.client_address}")
+
         self.request = DNSRecord.parse(data)
 
         qname = self.request.q.qname

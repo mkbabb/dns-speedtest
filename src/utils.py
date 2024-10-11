@@ -4,17 +4,21 @@ import string
 from dataclasses import dataclass
 from pathlib import Path
 from src.constants import RECORD_SIZE, DEFAULT_CHUNK_FILEPATH
+from loguru import logger
 
 
 class ChunkCache:
     def __init__(
-        self, cache_size: int, chunk_size: int, file_path: str | Path | None = DEFAULT_CHUNK_FILEPATH
+        self,
+        cache_size: int,
+        chunk_size: int,
+        file_path: str | Path | None = DEFAULT_CHUNK_FILEPATH,
     ):
         self.cache_size = cache_size
         self.chunk_size = chunk_size
 
         self.file_path = Path(file_path) if file_path is not None else None
-        
+
         if self.file_path is not None:
             self.chunks = self.read_and_chunk_file()
         else:
@@ -23,7 +27,7 @@ class ChunkCache:
     def get_random_chunks(self, num_chunks: int) -> list[str]:
         num_chunks = clamp(num_chunks, 1, len(self.chunks))
         start = random.randint(0, len(self.chunks) - num_chunks)
-        
+
         return self.chunks[start : start + num_chunks]
 
     def read_and_chunk_file(self) -> list[str]:
@@ -102,11 +106,18 @@ class DNSUrl:
             url (str): The DNS URL to parse
         """
 
+        logger.debug(f"Parsing DNS URL: {url}")
+
         match = re.match(r"(\d+_)?(\w+_)?(.+)", url)
         if not match:
-            raise ValueError("Invalid DNS URL format")
+            logger.error(f"Invalid DNS URL format: {url}")
+            
+            return DNSUrl(byte_len=RECORD_SIZE, uid="", domain=url)
+            # raise ValueError("Invalid DNS URL format")
 
         byte_len, uid, domain = match.groups()
+
+        logger.debug(f"Unparsed; Byte length: {byte_len}, UID: {uid}, Domain: {domain}")
 
         if byte_len:
             try:
@@ -120,5 +131,7 @@ class DNSUrl:
             uid = uid[:-1]
         else:
             uid = ""
+
+        logger.debug(f"Byte length: {byte_len}, UID: {uid}, Domain: {domain}")
 
         return DNSUrl(byte_len=byte_len, uid=uid, domain=domain)

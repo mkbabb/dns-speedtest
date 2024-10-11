@@ -1,24 +1,13 @@
-import socket
-import socketserver
-import struct
-import threading
-import time
-
-from dnslib import RCODE, DNSRecord
-from dnslib.server import BaseResolver, DNSError
-from loguru import logger
-
-from src.constants import DEFAULT_PORT, RECV_BUFFER_SIZE
-
 from __future__ import annotations
 
 import socket
 import socketserver
 import struct
+import threading
 import time
-from typing import Any
+from typing import Any, override
 
-from dnslib import DNSRecord
+from dnslib import RCODE, DNSRecord
 from dnslib.server import BaseResolver, DNSError
 from loguru import logger
 
@@ -30,15 +19,21 @@ class DNSHandler(socketserver.BaseRequestHandler):
     server: socketserver.BaseServer
     request: socket.socket | tuple[bytes, socket.socket]
     client_address: tuple[str, int]
+    protocol: str
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.udplen = 0
         super().__init__(*args, **kwargs)
 
+    @override
     def handle(self) -> None:
         if self.server.socket_type == socket.SOCK_STREAM:
+            logger.info(f"TCP Connection from {self.client_address}")
+            self.protocol = "TCP"
             self.handle_tcp()
         else:
+            logger.info(f"UDP Connection from {self.client_address}")
+            self.protocol = "UDP"
             self.handle_udp()
 
     def handle_tcp(self) -> None:
@@ -121,6 +116,7 @@ class DNSHandler(socketserver.BaseRequestHandler):
 
         if self.server.socket_type == socket.SOCK_DGRAM:
             rdata = reply.pack()
+
             if self.udplen and len(rdata) > self.udplen:
                 truncated_reply = reply.truncate()
                 rdata = truncated_reply.pack()
