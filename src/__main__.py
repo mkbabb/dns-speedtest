@@ -59,9 +59,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    log_file_path = Path(args.log_file)
+
     # Configure Loguru
     logger.add(sys.stderr, format="{time} {level} {message}", level="INFO")
-    logger.add(args.log_file, rotation="10 MB", compression="zip", level="INFO")
+    logger.add(log_file_path, rotation="10 MB", compression="zip", level="INFO")
+    # pcap log
+    logger.add(
+        log_file_path.parent / "pcap.log",
+        rotation="10 MB",
+        compression="zip",
+        level="INFO",
+        filter=lambda record: record["extra"].get("pcap") == True,
+    )
 
     # Load configuration
     config = load_config(args.config)
@@ -69,6 +79,8 @@ def main() -> None:
     # Create database engine
     engine = create_db_engine(config)
 
+    # delete all tables
+    Base.metadata.drop_all(engine)
     # Create tables
     Base.metadata.create_all(engine)
 

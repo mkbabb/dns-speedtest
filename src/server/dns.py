@@ -1,25 +1,36 @@
 from __future__ import annotations
 
+import ctypes
 import select
 import socket
 import socketserver
+import statistics
 import struct
 import threading
 import time
-from typing import Any, override
+import uuid
+from typing import Any, Optional, override
 
 from dnslib import RCODE, DNSRecord
 from dnslib.server import BaseResolver, DNSError
 from loguru import logger
+from sqlalchemy.engine import Engine
 
-from src.constants import DEFAULT_PORT, RECV_BUFFER_SIZE
-
-import ctypes
-import statistics
+from src.constants import (
+    DEFAULT_ADDRESS,
+    DEFAULT_INTERFACE,
+    DEFAULT_PORT,
+    RECV_BUFFER_SIZE,
+)
+from src.server.pcap import DNSPacketCapture
+from src.utils import get_interface_ip
 
 # Load time.h for high-precision timing
 libc = ctypes.CDLL('libc.so.6')
 CLOCK_MONOTONIC_RAW = 4  # system-wide clock that isn't subject to NTP adjustments
+
+LENGTH_SIZE = 2
+LENGTH_TYPE = "!H"
 
 
 class timespec(ctypes.Structure):
@@ -42,9 +53,14 @@ def measure_python_overhead():
 
 
 class DNSHandler(socketserver.BaseRequestHandler):
-    udplen: int
-    server: socketserver.BaseServer
+    server: (
+        socketserver.BaseServer
+        | socketserver.UDPServer
+        | socketserver.TCPServer
+        | "DNSServer"
+    )
     request: socket.socket | tuple[bytes, socket.socket]
+    udplen: int
     client_address: tuple[str, int]
     protocol: str
 
@@ -72,19 +88,19 @@ class DNSHandler(socketserver.BaseRequestHandler):
         data = self.receive_tcp_data()
 
         receive_end_time = time.perf_counter_ns()
-        receive_delta = receive_end_time - receive_start_time
+        receive_latency = receive_end_time - receive_start_time
 
         if data is None:
             return
 
-        self.on_receive(data=data, delta=receive_delta)
+        transaction_uuid = self.on_receive(data=data, latency=receive_latency)
 
         try:
-            rdata = self.get_reply(data)
+            rdata = self.get_reply(data=data, transaction_uuid=transaction_uuid)
 
-            send_delta = self.send_tcp_reply(rdata=rdata, num_runs=1)
+            send_latency = self.send_tcp_reply(rdata=rdata)
 
-            self.on_send(data=rdata, delta=send_delta)
+            self.on_send(data=rdata, latency=send_latency)
         except DNSError as e:
             logger.error(f"DNS Error: {e}")
 
@@ -94,98 +110,81 @@ class DNSHandler(socketserver.BaseRequestHandler):
         data, connection = self.request  # type: ignore
 
         receive_end_time = time.perf_counter_ns()
-        receive_delta = receive_end_time - receive_start_time
+        receive_latency = receive_end_time - receive_start_time
 
-        self.on_receive(data=data, delta=receive_delta)
+        transaction_uuid = self.on_receive(data=data, latency=receive_latency)
 
         try:
-            rdata = self.get_reply(data)
+            rdata = self.get_reply(data=data, transaction_uuid=transaction_uuid)
 
-            send_delta = self.send_udp_reply(rdata=rdata, connection=connection)
+            send_latency = self.send_udp_reply(rdata=rdata, connection=connection)
 
-            self.on_send(data=rdata, delta=send_delta)
+            self.on_send(data=rdata, latency=send_latency)
         except DNSError as e:
             logger.error(f"DNS Error: {e}")
 
     def receive_tcp_data(self) -> bytes | None:
         data = self.request.recv(RECV_BUFFER_SIZE)
 
-        if len(data) < 2:
+        if len(data) < LENGTH_SIZE:
             return None
 
-        length = struct.unpack("!H", bytes(data[:2]))[0]
+        length = struct.unpack(LENGTH_TYPE, bytes(data[:LENGTH_SIZE]))[0]
 
-        while len(data) - 2 < length:
+        while len(data) - LENGTH_SIZE < length:
             new_data = self.request.recv(RECV_BUFFER_SIZE)
             if not new_data:
                 break
             data += new_data
 
-        return data[2:]
+        return data[LENGTH_SIZE:]
 
-    def send_tcp_reply(self, rdata: bytes, num_runs: int = 1) -> float:
-        rdata = struct.pack("!H", len(rdata)) + rdata
+    def send_tcp_reply(
+        self,
+        rdata: bytes,
+    ) -> float:
+        rdata = struct.pack(LENGTH_TYPE, len(rdata)) + rdata
         self.request.setblocking(False)
 
-        python_overhead = statistics.mean(measure_python_overhead() for _ in range(100))
+        send_start_time = get_time_ns()
 
-        deltas = []
-        for _ in range(num_runs):
-            send_start_time = get_time_ns()
+        self.request.sendall(rdata)
 
-            self.request.sendall(rdata)
+        send_end_time = get_time_ns()
 
-            send_end_time = get_time_ns()
-
-            deltas.append(send_end_time - send_start_time - python_overhead)
+        latency = send_end_time - send_start_time
 
         self.request.setblocking(True)
 
-        avg_delta = statistics.mean(deltas)
+        logger.info(f"Sent data of length {len(rdata)} in {latency/1e6:.2f} ms")
 
-        speed = len(rdata) / (avg_delta / 1e9)
-
-        logger.info(
-            f"Sent data of length {len(rdata)} in {avg_delta/1e6:.2f} ms at {speed/1e6:.2f} MB/s "
-            f"(averaged over {num_runs} runs, Python overhead: {python_overhead:.2f} ns)"
-        )
-
-        return avg_delta
+        return latency
 
     def send_udp_reply(
-        self, rdata: bytes, connection: socket.socket, num_runs: int = 1
+        self,
+        rdata: bytes,
+        connection: socket.socket,
     ) -> None:
-        python_overhead = statistics.mean(measure_python_overhead() for _ in range(100))
+        send_start_time = get_time_ns()
 
-        deltas = []
+        connection.sendto(rdata, self.client_address)
 
-        for _ in range(num_runs):
-            send_start_time = get_time_ns()
+        send_end_time = get_time_ns()
 
-            connection.sendto(rdata, self.client_address)
+        latency = send_end_time - send_start_time
 
-            send_end_time = get_time_ns()
+        logger.info(f"Sent data of length {len(rdata)} in {latency/1e6:.2f} ms")
 
-            deltas.append(send_end_time - send_start_time - python_overhead)
-
-        avg_delta = statistics.mean(deltas)
-
-        speed = len(rdata) / (avg_delta / 1e9)
-
-        logger.info(
-            f"Sent data of length {len(rdata)} in {avg_delta/1e6:.2f} ms at {speed/1e6:.2f} MB/s "
-            f"(averaged over {num_runs} runs, Python overhead: {python_overhead:.2f} ns)"
-        )
-
-        return avg_delta
+        return latency
 
     def get_reply(self, data: bytes) -> bytes:
         request = DNSRecord.parse(data)
 
         resolver: BaseResolver = self.server.resolver  # type: ignore
 
-        reply = resolver.resolve(request, self)
+        reply = resolver.resolve(request=request, handler=self)
 
+        # Handle UDP truncation
         if self.server.socket_type == socket.SOCK_DGRAM:
             rdata = reply.pack()
 
@@ -197,11 +196,33 @@ class DNSHandler(socketserver.BaseRequestHandler):
 
         return rdata
 
-    def on_receive(self, data: bytes, delta: float) -> None:
-        logger.info(f"Received data of length {len(data)} in {delta/1e6:.2f} ms")
+    def on_receive(self, data: bytes, latency: float) -> Optional[uuid.UUID]:
+        logger.info(f"Received data of length {len(data)} in {latency/1e6:.2f} ms")
+        if self.server.packet_capture is None:
+            return
 
-    def on_send(self, data: bytes, delta: float) -> None:
-        logger.info(f"Sent data of length {len(data)} in {delta/1e6:.2f} ms")
+        transaction_uuid = uuid.uuid4()
+
+        transaction_key = DNSPacketCapture.make_transaction_key(
+            ip_src=self.client_address[0],
+            src_port=self.client_address[1],
+            # ip_dst=self.server.server_address[0],
+            ip_dst=self.server.interface_ip,
+            dst_port=self.server.server_address[1],
+        )
+
+        self.server.packet_capture.add_uuid(
+            transaction_uuid=transaction_uuid, transaction_key=transaction_key
+        )
+
+        logger.info(
+            f"Assigned UUID {transaction_uuid} to transaction {transaction_key}"
+        )
+
+        return transaction_uuid
+
+    def on_send(self, data: bytes, latency: float) -> None:
+        logger.info(f"Sent data of length {len(data)} in {latency/1e6:.2f} ms")
 
 
 class BaseResolver(object):
@@ -233,8 +254,10 @@ class UDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer, object):
     def __init__(self, server_address, handler):
         self.allow_reuse_address = True
         self.daemon_threads = True
+
         if server_address[0] != '' and ':' in server_address[0]:
             self.address_family = socket.AF_INET6
+
         super(UDPServer, self).__init__(server_address, handler)
 
 
@@ -242,62 +265,44 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer, object):
     def __init__(self, server_address, handler):
         self.allow_reuse_address = True
         self.daemon_threads = True
+
         if server_address[0] != '' and ':' in server_address[0]:
             self.address_family = socket.AF_INET6
+
         super(TCPServer, self).__init__(server_address, handler)
 
 
 class DNSServer(object):
-    """
-    Convenience wrapper for socketserver instance allowing
-    either UDP/TCP server to be started in blocking more
-    or as a background thread.
-
-    Processing is delegated to custom resolver (instance) and
-    optionally custom logger (instance), handler (class), and
-    server (class)
-
-    In most cases only a custom resolver instance is required
-    (and possibly logger)
-    """
-
     def __init__(
         self,
         resolver: BaseResolver,
-        address: str = "",
+        address: str = DEFAULT_ADDRESS,
         port: int = DEFAULT_PORT,
         tcp: bool = False,
-        handler: DNSHandler = DNSHandler,
-        server: socketserver.BaseServer | None = None,
+        handler: type[DNSHandler] = DNSHandler,
+        server: Optional[type[socketserver.BaseServer]] = None,
+        packet_capture: Optional[DNSPacketCapture] = None,
     ):
-        """
-        resolver:   resolver instance
-        address:    listen address (default: "")
-        port:       listen port (default: DEFAULT_PORT)
-        tcp:        UDP (false) / TCP (true) (default: False)
-        logger:     logger instance (default: DNSLogger)
-        handler:    handler class (default: DNSHandler)
-        server:     socketserver class (default: UDPServer/TCPServer)
-        """
         if server is None:
-            if tcp:
-                server = TCPServer
-            else:
-                server = UDPServer
+            server = TCPServer if tcp else UDPServer
 
         self.server = server((address, port), handler)
         self.server.resolver = resolver
+        self.server.interface_ip = get_interface_ip(interface_name=DEFAULT_INTERFACE)
 
-    def start(self):
+        self.packet_capture = packet_capture
+
+    def start(self) -> None:
         self.server.serve_forever()
 
-    def start_thread(self):
+    def stop(self) -> None:
+        self.server.shutdown()
+
+    def start_thread(self) -> None:
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.daemon = True
         self.thread.start()
 
-    def stop(self):
+    def stop_thread(self) -> None:
         self.server.shutdown()
-
-    def isAlive(self):
-        return self.thread.is_alive()
+        self.thread.join()

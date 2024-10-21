@@ -4,16 +4,18 @@ version = "0.1.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
 loguru = "^0.7.2"
 dnslib = "^0.9.25"
 sqlalchemy = "^2.0.35"
-mysql-connector-python = "^9.0.0"
+mysql-connector-python = "^9.1.0"
 toml = "^0.10.2"
 ipinfo = "^5.1.1"
 googleapiutils2 = "^0.14.2"
+scapy = "^2.6.0"
 
 
 [tool.poetry.group.dev.dependencies]

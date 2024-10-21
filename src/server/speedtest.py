@@ -1,17 +1,20 @@
 import time
 from datetime import datetime
-from typing import override
+from typing import Optional, override
+import uuid
 
 import ipinfo
 import ipinfo.details
-from dnslib import NS, QTYPE, RR, SOA, TXT, A, DNSHeader, DNSRecord
+from dnslib import NS, QTYPE, RR, SOA, TXT, A, DNSHeader, DNSRecord, AAAA, MX
 from dnslib.server import BaseResolver
 from loguru import logger
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from src.constants import (
+    CACHE_SIZE,
     DEFAULT_ADDRESS,
+    DEFAULT_INTERFACE,
     DEFAULT_PORT,
     DOMAIN_NAME,
     EXPIRE_TIME,
@@ -20,12 +23,13 @@ from src.constants import (
     RECORD_SIZE,
     REFRESH_TIME,
     RETRY_TIME,
-    SERIAL_NUMBER,
-    TTL,
+    DNS_TTL,
+    NS_1_IP,
 )
 from src.models import DNSUrlsTable, IPInfoTable, RequestsTable, SpeedtestResultsTable
 from src.server.dns import BaseResolver, DNSHandler, DNSServer
-from src.utils import ChunkCache, DNSUrl, calc_speed
+from src.server.pcap import DNSPacketCapture
+from src.utils import ChunkCache, DNSUrl, calc_throughput
 
 
 class DomainName(str):
@@ -37,9 +41,10 @@ class DomainName(str):
 
 
 D = DomainName(DOMAIN_NAME)
-IP = DEFAULT_ADDRESS
 
-soa_record = SOA(
+SERIAL_NUMBER = int(time.time())
+
+SOA_RECORD = SOA(
     mname=D["ns-1"],  # primary name server
     rname=D.admin,  # email of the domain administrator
     times=(
@@ -51,12 +56,13 @@ soa_record = SOA(
     ),
 )
 
-ns_records = [NS(D["ns-1"])]
+NS_RECORDS = [NS(D["ns-1"])]
 
-records = {
-    D: [A(IP), soa_record] + ns_records,
-    D["ns-1"]: [A(IP)],
-    D.admin: [A(IP)],
+RECORDS = {
+    D: [A(NS_1_IP), AAAA((0,) * 16), MX(D.mail), SOA_RECORD] + NS_RECORDS,
+    D["ns-1"]: [A(NS_1_IP)],
+    D.admin: [A(NS_1_IP)],
+    D.mail: [A(NS_1_IP)],
 }
 
 
@@ -81,8 +87,10 @@ class SpeedtestDNSHandler(DNSHandler):
         return super().handle()
 
     @override
-    def get_reply(self, data: bytes):
-        logger.info(f"Received DNS request from {self.client_address}")
+    def get_reply(self, data: bytes, transaction_uuid: Optional[uuid.UUID] = None):
+        logger.info(
+            f"Received DNS request from {self.client_address} : {transaction_uuid}"
+        )
 
         self.dns_record = DNSRecord.parse(data)
 
@@ -94,7 +102,6 @@ class SpeedtestDNSHandler(DNSHandler):
 
         self.dns_url = DNSUrl.from_url(url)
 
-        # TODO! hack to get the engine
         with Session(self.server.engine) as session:
             dns_url_table_obj = DNSUrlsTable(
                 byte_len=self.dns_url.byte_len,
@@ -107,11 +114,13 @@ class SpeedtestDNSHandler(DNSHandler):
                 qtype=qtype,
                 start_time=self.start_time,
                 ip=ip,
+                transaction_uuid=(
+                    str(transaction_uuid) if transaction_uuid is not None else None
+                ),
                 dns_url=dns_url_table_obj,
             )
 
             session.add(request_table_obj)
-
             session.commit()
 
             self.request_id = request_table_obj.id
@@ -120,34 +129,16 @@ class SpeedtestDNSHandler(DNSHandler):
                 f"Logged DNS request: {qtype} from {ip} for {self.dns_url.domain}"
             )
 
-            try:
-                details: ipinfo.details.Details = self.server.ipinfo_handler.getDetails(
-                    ip
-                )
-                details = details.all
+            # self.call_ipinfo(
+            #     ip=ip,
+            #     request_table_obj=request_table_obj,
+            # )
+            # session.commit()
 
-                if details.get("bogon"):
-                    raise Exception("Bogon IP address")
-
-                ipinfo_table_obj = IPInfoTable(
-                    ip_address=details["ip"],
-                    location=details["loc"],
-                    org=details["org"],
-                    postal=details["postal"],
-                    city=details["city"],
-                    region=details["region"],
-                    country=details["country"],
-                )
-                request_table_obj.ipinfo = ipinfo_table_obj
-
-                session.commit()
-            except Exception as e:
-                logger.error(f"Error getting IP info: {e}")
-
-        return super().get_reply(data)
+        return super().get_reply(data=data)
 
     @override
-    def on_send(self, data: bytes, delta: float):
+    def on_send(self, data: bytes, latency: float):
         qtype = QTYPE[self.dns_record.q.qtype]
 
         end_time = datetime.now()
@@ -158,40 +149,49 @@ class SpeedtestDNSHandler(DNSHandler):
 
             session.commit()
 
-        if qtype == 'TXT' or qtype == 'A':
-            self.log_txt_or_a_query(
-                data=data,
-                delta=delta,
-            )
+    def call_ipinfo(self, ip: str, request_table_obj: RequestsTable):
+        try:
+            details: ipinfo.details.Details = self.server.ipinfo_handler.getDetails(ip)
+            details = details.all
 
-    def log_txt_or_a_query(
-        self,
-        data: bytes,
-        delta: float,
-    ):
-        with Session(self.server.engine) as session:
-            dl_speed = calc_speed(
-                delta=delta,
-                byte_len=len(data),
-            )
-            speedtest_result = SpeedtestResultsTable(
-                request_id=self.request_id,
-                delta=delta,
-                dl_speed=dl_speed,
-            )
+            if details.get("bogon"):
+                raise Exception("Bogon DEFAULT_ADDRESS address")
 
-            session.add(speedtest_result)
-            session.commit()
+            ipinfo_table_obj = IPInfoTable(
+                ip_address=details["ip"],
+                location=details["loc"],
+                org=details["org"],
+                postal=details["postal"],
+                city=details["city"],
+                region=details["region"],
+                country=details["country"],
+            )
+            request_table_obj.ipinfo = ipinfo_table_obj
 
-        logger.info(f"Logged Speed Test result for request {self.request_id}")
+            return request_table_obj
+        except Exception as e:
+            logger.error(f"Error getting IP info: {e}")
+
+
+from dnslib import DNSRecord, DNSHeader, RR, QTYPE, SOA, NS, TXT, A, AAAA
+from dnslib.server import BaseResolver
+from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SpeedTestResolver(BaseResolver):
     def __init__(self, chunk_cache: ChunkCache):
         self.chunk_cache = chunk_cache
 
-    @override
-    def resolve(self, request: DNSRecord, handler: DNSHandler) -> DNSRecord:
+    def resolve(self, request: DNSRecord, handler: SpeedtestDNSHandler) -> DNSRecord:
+        """
+        Main resolver method.
+        DNS Spec: This method implements the basic structure of a DNS response,
+        setting the QR (Query Response) flag to 1, AA (Authoritative Answer) flag to 1,
+        and RA (Recursion Available) flag to 0 as per RFC 1035.
+        """
         qname = request.q.qname
         qtype = request.q.qtype
         qt = QTYPE[qtype]
@@ -199,56 +199,81 @@ class SpeedTestResolver(BaseResolver):
         logger.info(f"Resolving query for {qname} with type {qt}")
 
         reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=0), q=request.q
         )
 
-        if qt in ['NS', 'SOA', 'A', 'TXT']:
-            logger.info(f"***Resolving query for {qname} with type {qt}")
+        self.add_soa_to_reply(reply)
 
-            reply = self.handle_standard_query(reply, qname, qt)
-            if qt == 'TXT' or qt == 'A':
-                reply = self.handle_txt_query(reply, qname, handler)
-
+        if not self.is_valid_domain(qname):
+            reply.header.rcode = 3
             return reply
+
+        if qt == 'SOA':
+            self.handle_soa_query(
+                reply=reply,
+                qname=qname,
+            )
+        elif qt == 'NS':
+            self.handle_ns_query(
+                reply=reply,
+                qname=qname,
+            )
+        elif qt in ['TXT', 'A', 'AAAA']:
+            self.handle_txt_query(
+                reply=reply,
+                qname=qname,
+                byte_len=handler.dns_url.byte_len,
+            )
         else:
-            return self.handle_unsupported_query(reply, qt)
-
-    def handle_standard_query(self, reply: DNSRecord, qname, qt):
-        qn = str(qname)
-
-        if qn == D or qn.endswith('.' + D):
-            for name, rrs in records.items():
-                if name == qn:
-                    for rdata in rrs:
-                        rqt = rdata.__class__.__name__
-                        if qt in ['*', rqt]:
-                            reply.add_answer(
-                                RR(
-                                    rname=qname,
-                                    rtype=getattr(QTYPE, rqt),
-                                    rclass=1,
-                                    ttl=TTL,
-                                    rdata=rdata,
-                                )
-                            )
-
-            for rdata in ns_records:
-                reply.add_ar(
-                    RR(rname=D, rtype=QTYPE.NS, rclass=1, ttl=TTL, rdata=rdata)
-                )
-
-            reply.add_auth(
-                RR(rname=D, rtype=QTYPE.SOA, rclass=1, ttl=TTL, rdata=soa_record)
+            self.handle_unsupported_query(
+                reply=reply,
+                qt=qt,
             )
 
-        logger.info(f"Resolved standard query for {qname} with type {qt}")
+        self.add_edns0_if_requested(
+            request=request,
+            reply=reply,
+        )
+
         return reply
 
-    def handle_txt_query(self, reply: DNSRecord, qname, handler: DNSHandler):
-        dns_url = handler.dns_url
-        byte_len = dns_url.byte_len
+    def handle_soa_query(self, reply: DNSRecord, qname: str):
+        """
+        Handle SOA (Start of Authority) queries.
+        DNS Spec: SOA record must be returned for SOA queries to the zone apex,
+        as per RFC 1035. It should also be included in the authority section of
+        all authoritative responses.
+        """
 
+        reply.add_answer(
+            RR(rname=qname, rtype=QTYPE.SOA, rclass=1, ttl=DNS_TTL, rdata=SOA_RECORD)
+        )
+
+        logger.info(f"Resolved SOA query for {qname}")
+
+    def handle_ns_query(self, reply: DNSRecord, qname: str):
+        """
+        Handle NS (Name Server) queries.
+        DNS Spec: NS records should be returned for NS queries to the zone apex
+        or delegated subdomains, as per RFC 1035.
+        """
+
+        for rdata in NS_RECORDS:
+            reply.add_answer(
+                RR(rname=qname, rtype=QTYPE.NS, rclass=1, ttl=DNS_TTL, rdata=rdata)
+            )
+
+        logger.info(f"Resolved NS query for {qname}")
+
+    def handle_txt_query(self, reply: DNSRecord, qname: str, byte_len: int):
+        """
+        Handle TXT, A, and AAAA queries with TXT responses.
+        DNS Spec: While this doesn't strictly follow the spec for A and AAAA queries,
+        it's a custom implementation for speed testing. TXT records can contain
+        arbitrary text strings up to 255 bytes each, as per RFC 1035.
+        """
         num_chunks = byte_len // MAX_TXT_CHUNK_SIZE
+
         chunks = self.chunk_cache.get_random_chunks(num_chunks)
 
         remaining_bytes = byte_len
@@ -260,25 +285,57 @@ class SpeedTestResolver(BaseResolver):
             remaining_bytes -= len(chunk)
 
             reply.add_answer(
-                RR(rname=qname, rtype=QTYPE.TXT, rclass=1, ttl=0, rdata=TXT(chunk))
+                RR(
+                    rname=qname,
+                    rtype=QTYPE.TXT,
+                    rclass=1,
+                    ttl=DNS_TTL,
+                    rdata=TXT(chunk),
+                )
             )
 
-        logger.info(f"Resolved TXT query for {qname} with {byte_len} bytes")
-
-        return reply
+        logger.info(f"Resolved TXT/A/AAAA query for {qname} with {byte_len} bytes")
 
     def handle_unsupported_query(self, reply: DNSRecord, qt):
-        reply.header.rcode = 3
-
+        """
+        Handle unsupported query types.
+        DNS Spec: Return NOTIMPL (4) for unsupported query types as per RFC 1035.
+        """
+        reply.header.rcode = 4  # Not Implemented
         logger.warning(f"Unsupported query type: {qt}")
 
-        return reply
+    def is_valid_domain(self, qname: str) -> bool:
+        """
+        Check if the queried domain is valid for this zone.
+        DNS Spec: Authoritative nameservers should only answer for domains within their zone of authority.
+        """
+        qn = str(qname)
+        return qn == D or qn.endswith('.' + D)
+
+    def add_soa_to_reply(self, reply: DNSRecord):
+        """
+        Add SOA record to the authority section of the reply.
+        DNS Spec: SOA should be included in the authority section of all authoritative responses,
+        including NXDOMAIN responses, as per RFC 1034 and RFC 2308.
+        """
+        reply.add_auth(
+            RR(rname=D, rtype=QTYPE.SOA, rclass=1, ttl=DNS_TTL, rdata=SOA_RECORD)
+        )
+
+    def add_edns0_if_requested(self, request: DNSRecord, reply: DNSRecord):
+        """
+        Add EDNS0 OPT record if it was in the request.
+        DNS Spec: EDNS0 is defined in RFC 6891 and allows for extended DNS mechanisms.
+        """
+        if request.ar and request.ar[0].rtype == QTYPE.OPT:
+            reply.add_ar(request.ar[0])
 
 
 class SpeedtestDNSServer(DNSServer):
     def __init__(
         self,
         engine: Engine,
+        packet_capture: DNSPacketCapture,
         ipinfo_handler: ipinfo.handler.Handler,
         cache_size: int,
         address: str = "",
@@ -295,6 +352,7 @@ class SpeedtestDNSServer(DNSServer):
         )
 
         super().__init__(
+            packet_capture=packet_capture,
             resolver=resolver,
             address=address,
             port=port,
@@ -302,30 +360,43 @@ class SpeedtestDNSServer(DNSServer):
             handler=SpeedtestDNSHandler,
         )
 
-        self.engine = engine
         self.server.engine = engine
         self.server.ipinfo_handler = ipinfo_handler
+        self.server.packet_capture = packet_capture
 
 
 def run_server(
-    port: int,
-    cache_size: int,
     engine: Engine,
     ipinfo_handler: ipinfo.handler.Handler,
+    interface: str = DEFAULT_INTERFACE,
+    port: int = DEFAULT_PORT,
+    cache_size: int = CACHE_SIZE,
 ) -> None:
+    packet_capture = DNSPacketCapture(
+        engine=engine,
+        interface=interface,
+        port=port,
+    )
+
+    packet_capture.start()
+
     udp_server = SpeedtestDNSServer(
         engine=engine,
+        packet_capture=packet_capture,
         ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
+        address="",
         tcp=False,
     )
 
     tcp_server = SpeedtestDNSServer(
         engine=engine,
+        packet_capture=packet_capture,
         ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
+        address="",
         tcp=True,
     )
 
@@ -342,5 +413,7 @@ def run_server(
     finally:
         tcp_server.stop()
         udp_server.stop()
+
+        packet_capture.stop()
 
         logger.info("Server stopped.")

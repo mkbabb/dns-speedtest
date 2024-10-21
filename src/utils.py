@@ -1,10 +1,16 @@
+import ipaddress
 import random
 import re
 import string
+import subprocess
 from dataclasses import dataclass
+from functools import lru_cache, wraps
 from pathlib import Path
-from src.constants import RECORD_SIZE, DEFAULT_CHUNK_FILEPATH
+from typing import Optional
+
 from loguru import logger
+
+from src.constants import DEFAULT_CHUNK_FILEPATH, RECORD_SIZE
 
 
 class ChunkCache:
@@ -19,18 +25,20 @@ class ChunkCache:
 
         self.file_path = Path(file_path) if file_path is not None else None
 
+        self.chunks: list[bytes] = []
+
         if self.file_path is not None:
             self.chunks = self.read_and_chunk_file()
         else:
             self.chunks = self.generate_random_chunks()
 
-    def get_random_chunks(self, num_chunks: int) -> list[str]:
+    def get_random_chunks(self, num_chunks: int) -> list[bytes]:
         num_chunks = clamp(num_chunks, 1, len(self.chunks))
         start = random.randint(0, len(self.chunks) - num_chunks)
 
         return self.chunks[start : start + num_chunks]
 
-    def read_and_chunk_file(self) -> list[str]:
+    def read_and_chunk_file(self) -> list[bytes]:
         """Read the file and split it into chunks of specified size."""
         try:
             content = self.file_path.read_bytes()
@@ -45,11 +53,12 @@ class ChunkCache:
             print(f"Error: Could not read file at {self.file_path}")
             return []
 
-    def generate_random_chunks(self) -> list[str]:
+    def generate_random_chunks(self) -> list[bytes]:
         """Generate random chunks of specified size."""
         content = ''.join(
-            random.choices(string.ascii_letters + string.digits, k=self.cache_size)
-        )
+            random.choices((string.ascii_letters + string.digits), k=self.cache_size)
+        ).encode()
+
         return [
             content[i : i + self.chunk_size]
             for i in range(0, len(content), self.chunk_size)
@@ -61,15 +70,48 @@ def clamp(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(value, max_value))
 
 
-def calc_speed(delta: float, byte_len: int) -> float:
+def calc_throughput(latency: float, byte_len: int) -> float:
     """Calculate the download speed in MB/s.
 
     Args:
-        delta (float): The time delta in nanoseconds
+        latency (float): The latency in nanoseconds
         byte_len (int): The amount of bytes downloaded
     """
+    return byte_len / (latency * 1e-9) / 1e6
 
-    return byte_len / delta * 1e9 / 2**20
+
+@lru_cache
+def is_private_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
+@lru_cache
+def get_interface_ip(interface_name: str) -> Optional[str]:
+    try:
+        # Run the ip addr show command for the specified interface
+        result = subprocess.run(
+            ['ip', 'addr', 'show', interface_name],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        output = result.stdout
+
+        # Parse the output to find the IPv4 address
+        for line in output.split('\n'):
+            if 'inet ' in line:
+                ip = line.split()[1].split('/')[0]
+                return ip
+
+        # If we couldn't find the IP, return None
+        return None
+
+    except subprocess.CalledProcessError:
+        # Command failed, likely due to non-existent interface
+        return None
 
 
 @dataclass
@@ -111,7 +153,7 @@ class DNSUrl:
         match = re.match(r"(\d+_)?(\w+_)?(.+)", url)
         if not match:
             logger.error(f"Invalid DNS URL format: {url}")
-            
+
             return DNSUrl(byte_len=RECORD_SIZE, uid="", domain=url)
             # raise ValueError("Invalid DNS URL format")
 
