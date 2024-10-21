@@ -1,11 +1,11 @@
 import time
+import uuid
 from datetime import datetime
 from typing import Optional, override
-import uuid
 
 import ipinfo
 import ipinfo.details
-from dnslib import NS, QTYPE, RR, SOA, TXT, A, DNSHeader, DNSRecord, AAAA, MX
+from dnslib import AAAA, CNAME, MX, NS, QTYPE, RR, SOA, TXT, A, DNSHeader, DNSRecord
 from dnslib.server import BaseResolver
 from loguru import logger
 from sqlalchemy.engine import Engine
@@ -16,15 +16,15 @@ from src.constants import (
     DEFAULT_ADDRESS,
     DEFAULT_INTERFACE,
     DEFAULT_PORT,
+    DNS_TTL,
     DOMAIN_NAME,
     EXPIRE_TIME,
     MAX_TXT_CHUNK_SIZE,
     MINIMUM_TIME,
+    NS_1_IP,
     RECORD_SIZE,
     REFRESH_TIME,
     RETRY_TIME,
-    DNS_TTL,
-    NS_1_IP,
 )
 from src.models import DNSUrlsTable, IPInfoTable, RequestsTable, SpeedtestResultsTable
 from src.server.dns import BaseResolver, DNSHandler, DNSServer
@@ -173,14 +173,6 @@ class SpeedtestDNSHandler(DNSHandler):
             logger.error(f"Error getting IP info: {e}")
 
 
-from dnslib import DNSRecord, DNSHeader, RR, QTYPE, SOA, NS, TXT, A, AAAA
-from dnslib.server import BaseResolver
-from typing import Optional
-import logging
-
-logger = logging.getLogger(__name__)
-
-
 class SpeedTestResolver(BaseResolver):
     def __init__(self, chunk_cache: ChunkCache):
         self.chunk_cache = chunk_cache
@@ -188,9 +180,9 @@ class SpeedTestResolver(BaseResolver):
     def resolve(self, request: DNSRecord, handler: SpeedtestDNSHandler) -> DNSRecord:
         """
         Main resolver method.
-        DNS Spec: This method implements the basic structure of a DNS response,
-        setting the QR (Query Response) flag to 1, AA (Authoritative Answer) flag to 1,
-        and RA (Recursion Available) flag to 0 as per RFC 1035.
+        Handles different types of DNS queries and constructs appropriate responses.
+        Routes TXT, A, and AAAA queries to a common handler for consistent
+        data delivery and TCP forcing.
         """
         qname = request.q.qname
         qtype = request.q.qtype
@@ -199,7 +191,14 @@ class SpeedTestResolver(BaseResolver):
         logger.info(f"Resolving query for {qname} with type {qt}")
 
         reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=0), q=request.q
+            DNSHeader(
+                id=request.header.id,
+                qr=1,  # QR: 1 (response),
+                aa=1,  # AA: 1 (authoritative),
+                ra=0,  # RA: 0 (recursion not available),
+                tc=1,  # TC: 1 (truncated)
+            ),
+            q=request.q,
         )
 
         self.add_soa_to_reply(reply)
@@ -209,81 +208,48 @@ class SpeedTestResolver(BaseResolver):
             return reply
 
         if qt == 'SOA':
-            self.handle_soa_query(
-                reply=reply,
-                qname=qname,
-            )
+            self.handle_soa_query(reply=reply, qname=qname)
         elif qt == 'NS':
-            self.handle_ns_query(
-                reply=reply,
-                qname=qname,
-            )
+            self.handle_ns_query(reply=reply, qname=qname)
         elif qt in ['TXT', 'A', 'AAAA']:
-            self.handle_txt_query(
+            self.handle_data_query(
                 reply=reply,
                 qname=qname,
+                qtype=qtype,
                 byte_len=handler.dns_url.byte_len,
             )
         else:
-            self.handle_unsupported_query(
-                reply=reply,
-                qt=qt,
-            )
+            self.handle_unsupported_query(reply=reply, qt=qt)
 
-        self.add_edns0_if_requested(
-            request=request,
-            reply=reply,
-        )
+        self.add_edns0_if_requested(request=request, reply=reply)
 
         return reply
 
-    def handle_soa_query(self, reply: DNSRecord, qname: str):
+    def handle_data_query(
+        self, reply: DNSRecord, qname: str, qtype: int, byte_len: int
+    ):
         """
-        Handle SOA (Start of Authority) queries.
-        DNS Spec: SOA record must be returned for SOA queries to the zone apex,
-        as per RFC 1035. It should also be included in the authority section of
-        all authoritative responses.
+        Handles TXT, A, and AAAA queries with data responses.
+        For A and AAAA queries, uses a special response to force TCP.
+        For TXT queries, splits the data into chunks and adds them to the reply.
         """
+        if qtype == QTYPE.TXT:
+            self.handle_txt_response(reply, qname, byte_len)
+        elif qtype in [QTYPE.A, QTYPE.AAAA]:
+            self.handle_a_aaaa_response(reply, qname, qtype, byte_len)
 
-        reply.add_answer(
-            RR(rname=qname, rtype=QTYPE.SOA, rclass=1, ttl=DNS_TTL, rdata=SOA_RECORD)
-        )
-
-        logger.info(f"Resolved SOA query for {qname}")
-
-    def handle_ns_query(self, reply: DNSRecord, qname: str):
+    def handle_txt_response(self, reply: DNSRecord, qname: str, byte_len: int):
         """
-        Handle NS (Name Server) queries.
-        DNS Spec: NS records should be returned for NS queries to the zone apex
-        or delegated subdomains, as per RFC 1035.
-        """
-
-        for rdata in NS_RECORDS:
-            reply.add_answer(
-                RR(rname=qname, rtype=QTYPE.NS, rclass=1, ttl=DNS_TTL, rdata=rdata)
-            )
-
-        logger.info(f"Resolved NS query for {qname}")
-
-    def handle_txt_query(self, reply: DNSRecord, qname: str, byte_len: int):
-        """
-        Handle TXT, A, and AAAA queries with TXT responses.
-        DNS Spec: While this doesn't strictly follow the spec for A and AAAA queries,
-        it's a custom implementation for speed testing. TXT records can contain
-        arbitrary text strings up to 255 bytes each, as per RFC 1035.
+        Handles TXT responses by splitting the data into chunks and adding them to the reply.
         """
         num_chunks = byte_len // MAX_TXT_CHUNK_SIZE
-
         chunks = self.chunk_cache.get_random_chunks(num_chunks)
-
         remaining_bytes = byte_len
 
         for chunk in chunks:
             if remaining_bytes < MAX_TXT_CHUNK_SIZE:
                 chunk = chunk[:remaining_bytes]
-
             remaining_bytes -= len(chunk)
-
             reply.add_answer(
                 RR(
                     rname=qname,
@@ -294,29 +260,85 @@ class SpeedTestResolver(BaseResolver):
                 )
             )
 
-        logger.info(f"Resolved TXT/A/AAAA query for {qname} with {byte_len} bytes")
+        logger.info(f"Resolved TXT query for {qname} with {byte_len} bytes")
+
+    def handle_a_aaaa_response(
+        self, reply: DNSRecord, qname: str, qtype: int, byte_len: int
+    ):
+        """
+        Handles A and AAAA responses.
+        Adds one valid A or AAAA record, then uses handle_txt_response for the rest of the data.
+        """
+        # Add one valid A or AAAA record
+        if qtype == QTYPE.A:
+            reply.add_answer(
+                RR(
+                    rname=qname,
+                    rtype=QTYPE.A,
+                    rclass=1,
+                    ttl=DNS_TTL,
+                    rdata=A(NS_1_IP),
+                )
+            )
+            address_record_len = 4  # IPv4 address is 4 bytes
+        else:  # AAAA
+            reply.add_answer(
+                RR(
+                    rname=qname,
+                    rtype=QTYPE.AAAA,
+                    rclass=1,
+                    ttl=DNS_TTL,
+                    rdata=AAAA(NS_1_IP),
+                )
+            )
+            address_record_len = 16  # IPv6 address is 16 bytes
+
+        # Adjust byte_len to account for the address record
+        adjusted_byte_len = max(0, byte_len - address_record_len)
+
+        # Use handle_txt_response for the rest of the data
+        self.handle_txt_response(reply, qname, adjusted_byte_len)
+
+        logger.info(
+            f"Resolved A/AAAA query for {qname} with 1 address record and {adjusted_byte_len} bytes of TXT data"
+        )
+
+    def handle_soa_query(self, reply: DNSRecord, qname: str):
+        """
+        Handles SOA (Start of Authority) queries by adding the SOA record to the reply.
+        """
+        reply.add_answer(
+            RR(rname=qname, rtype=QTYPE.SOA, rclass=1, ttl=DNS_TTL, rdata=SOA_RECORD)
+        )
+        logger.info(f"Resolved SOA query for {qname}")
+
+    def handle_ns_query(self, reply: DNSRecord, qname: str):
+        """
+        Handles NS (Name Server) queries by adding NS records to the reply.
+        """
+        for rdata in NS_RECORDS:
+            reply.add_answer(
+                RR(rname=qname, rtype=QTYPE.NS, rclass=1, ttl=DNS_TTL, rdata=rdata)
+            )
+        logger.info(f"Resolved NS query for {qname}")
 
     def handle_unsupported_query(self, reply: DNSRecord, qt):
         """
-        Handle unsupported query types.
-        DNS Spec: Return NOTIMPL (4) for unsupported query types as per RFC 1035.
+        Handles unsupported query types by setting the response code to NOTIMPL (4).
         """
         reply.header.rcode = 4  # Not Implemented
         logger.warning(f"Unsupported query type: {qt}")
 
     def is_valid_domain(self, qname: str) -> bool:
         """
-        Check if the queried domain is valid for this zone.
-        DNS Spec: Authoritative nameservers should only answer for domains within their zone of authority.
+        Checks if the queried domain is valid for this zone.
         """
         qn = str(qname)
         return qn == D or qn.endswith('.' + D)
 
     def add_soa_to_reply(self, reply: DNSRecord):
         """
-        Add SOA record to the authority section of the reply.
-        DNS Spec: SOA should be included in the authority section of all authoritative responses,
-        including NXDOMAIN responses, as per RFC 1034 and RFC 2308.
+        Adds SOA record to the authority section of the reply.
         """
         reply.add_auth(
             RR(rname=D, rtype=QTYPE.SOA, rclass=1, ttl=DNS_TTL, rdata=SOA_RECORD)
@@ -324,8 +346,7 @@ class SpeedTestResolver(BaseResolver):
 
     def add_edns0_if_requested(self, request: DNSRecord, reply: DNSRecord):
         """
-        Add EDNS0 OPT record if it was in the request.
-        DNS Spec: EDNS0 is defined in RFC 6891 and allows for extended DNS mechanisms.
+        Adds EDNS0 OPT record to the reply if it was present in the request.
         """
         if request.ar and request.ar[0].rtype == QTYPE.OPT:
             reply.add_ar(request.ar[0])
