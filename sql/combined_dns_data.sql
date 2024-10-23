@@ -1,4 +1,5 @@
-CREATE OR REPLACE VIEW combined_dns_data AS
+CREATE
+OR REPLACE VIEW combined_dns_data AS
 SELECT
     d.id AS dns_url_id,
     d.byte_len AS dns_url_byte_len,
@@ -12,8 +13,8 @@ SELECT
     r.ip AS request_ip,
     s.id AS speedtest_id,
     s.latency AS speedtest_latency,
-    -- s.throughput AS speedtest_dl_speed,
-    p.throughput as speedtest_dl_speed,
+    COALESCE(psd.mb_per_second, s.throughput) AS speedtest_dl_speed,
+    -- Convert MB/s to Mbps
     i.ip_address AS ip_info_address,
     i.location AS ip_info_location,
     i.org AS ip_info_org,
@@ -26,11 +27,11 @@ SELECT
     p.src_port AS packet_capture_src_port,
     p.dst_ip AS packet_capture_dst_ip,
     p.dst_port AS packet_capture_dst_port,
-    p.request_timestamp AS packet_capture_request_timestamp,
-    p.response_timestamp AS packet_capture_response_timestamp,
-    p.request_size AS packet_capture_request_size,
-    p.response_size AS packet_capture_response_size,
-    p.latency AS packet_capture_latency,
+    p.timestamp AS packet_capture_request_timestamp,
+    p.timestamp AS packet_capture_response_timestamp,
+    p.size AS packet_capture_request_size,
+    p.size AS packet_capture_response_size,
+    CAST(p.timestamp AS FLOAT) / 1e9 AS packet_capture_latency,
     CASE
         WHEN s.id IS NOT NULL THEN 'Yes'
         ELSE 'No'
@@ -45,11 +46,8 @@ SELECT
     END AS has_packet_capture_result
 FROM
     dns_urls d
-LEFT JOIN
-    requests r ON d.id = r.dns_url_id
-LEFT JOIN
-    speedtest_results s ON r.id = s.request_id
-LEFT JOIN
-    ipinfo i ON r.ipinfo_id = i.id
-LEFT JOIN
-    packet_capture_results p ON r.transaction_uuid = p.transaction_uuid;
+    LEFT JOIN requests r ON d.id = r.dns_url_id
+    LEFT JOIN speedtest_results s ON r.id = s.request_id
+    LEFT JOIN ipinfo i ON r.ipinfo_id = i.id
+    LEFT JOIN packet_capture_results p ON r.transaction_uuid = p.transaction_uuid
+    LEFT JOIN pcap_speedtest_data psd ON p.transaction_uuid = psd.transaction_uuid;

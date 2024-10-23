@@ -1667,6 +1667,20 @@ files = [
 ]
 
 [[package]]
+name = "ping3"
+version = "4.0.8"
+description = "A pure python3 version of ICMP ping implementation using raw socket."
+optional = false
+python-versions = ">=3.5"
+files = [
+    {file = "ping3-4.0.8-py3-none-any.whl", hash = "sha256:b5c294851968b4229e9af69d252778241cb84221594b436a8677419c31925594"},
+    {file = "ping3-4.0.8.tar.gz", hash = "sha256:9ab460eb57f006b71f977a693d157215aabd6bbcbc6cd6428b6951eaae0c2875"},
+]
+
+[package.extras]
+dev = ["build", "twine"]
+
+[[package]]
 name = "platformdirs"
 version = "4.3.6"
 description = "A small Python package for determining appropriate platform-specific dirs, e.g. a `user data dir`."
@@ -2902,4 +2916,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.12"
-content-hash = "6abcf8f37b2536af02e9d44d99230ce5f17c6e7d01411bcf486be53908eeb90d"
+content-hash = "c1ba1bfa45f070970c48696fc5c5217cd39da46393ffe7ea7e174771992f8310"

@@ -249,7 +249,9 @@ class SpeedTestResolver(BaseResolver):
         for chunk in chunks:
             if remaining_bytes < MAX_TXT_CHUNK_SIZE:
                 chunk = chunk[:remaining_bytes]
+
             remaining_bytes -= len(chunk)
+
             reply.add_answer(
                 RR(
                     rname=qname,

@@ -109,29 +109,25 @@ class DNSPacketCapture:
         # Get the length of the IP layer
         # ip_layer_len = packet[IP].len
 
-        # # Initialize transport layer length
-        # transport_layer_len = 0
+        # Initialize transport layer length
+        transport_layer_len = 0
 
-        # # Check for TCP or UDP layer and get its length
-        # if TCP in packet:
-        #     if Raw in packet:
-        #         transport_layer_len = len(packet[Raw].load)
-        #     else:
-        #         transport_layer_len = len(packet[TCP])
+        # Check for TCP or UDP layer and get its length
+        if TCP in packet:
+            if Raw in packet:
+                transport_layer_len = len(packet[Raw].load)
+            else:
+                transport_layer_len = len(packet[TCP])
+        elif UDP in packet:
+            transport_layer_len = packet[UDP].len
 
-        # elif UDP in packet:
-        #     transport_layer_len = packet[UDP].len
-
-        # # Return the sum of IP and transport layer lengths
-        # return transport_layer_len
-
-        return len(packet)
+        # Return the sum of IP and transport layer lengths
+        return transport_layer_len
 
     def capture_packets(self) -> None:
         logger.info(
             f"Starting packet capture on interface {self.interface}, port {self.port}"
         )
-        # use the pcap logger:
 
         sniff(
             iface=self.interface,
