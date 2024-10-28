@@ -10,6 +10,7 @@ from dnslib.server import BaseResolver
 from loguru import logger
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
+import ipaddress
 
 from src.constants import (
     CACHE_SIZE,
@@ -29,7 +30,7 @@ from src.constants import (
 from src.models import DNSUrlsTable, IPInfoTable, RequestsTable, SpeedtestResultsTable
 from src.server.dns import BaseResolver, DNSHandler, DNSServer
 from src.server.pcap import DNSPacketCapture
-from src.utils import ChunkCache, DNSUrl, calc_throughput
+from src.utils import ChunkCache, DNSUrl, calc_throughput, ipv4_to_ipv6
 
 
 class DomainName(str):
@@ -64,6 +65,9 @@ RECORDS = {
     D.admin: [A(NS_1_IP)],
     D.mail: [A(NS_1_IP)],
 }
+
+
+NS_1_IP_V6 = ipv4_to_ipv6(NS_1_IP)
 
 
 class SpeedtestDNSHandler(DNSHandler):
@@ -290,7 +294,7 @@ class SpeedTestResolver(BaseResolver):
                     rtype=QTYPE.AAAA,
                     rclass=1,
                     ttl=DNS_TTL,
-                    rdata=AAAA(NS_1_IP),
+                    rdata=AAAA(NS_1_IP_V6),
                 )
             )
             address_record_len = 16  # IPv6 address is 16 bytes

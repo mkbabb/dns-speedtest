@@ -26,6 +26,7 @@ transaction_stats AS (
         MIN(
             CASE
                 WHEN rp.flags = 'PA'
+                OR rp.flags = 'SPA'
                 AND rp.src_ip NOT LIKE '10.%' THEN rp.timestamp
             END
         ) AS first_pa_timestamp,
@@ -100,7 +101,7 @@ final_stats AS (
     SELECT
         *,
         CASE
-            WHEN rtt_seconds IS NOT NULL THEN NULLIF(total_duration_seconds - rtt_seconds, 0)
+            WHEN rtt_seconds IS NOT NULL THEN NULLIF(total_duration_seconds - 2 * rtt_seconds, 0)
             ELSE total_duration_seconds
         END AS adjusted_duration_seconds,
         total_bytes / 1e6 AS total_mb

@@ -88,6 +88,13 @@ def is_private_ip(ip: str) -> bool:
         return False
 
 
+def ipv4_to_ipv6(ip: str | int | ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """Convert an IPv4 address to an IPv6 address."""
+    ipv4 = ipaddress.IPv4Address(ip)
+
+    return str(ipaddress.IPv6Address(f"::ffff:{ipv4}"))
+
+
 @lru_cache
 def get_interface_ip(interface_name: str) -> Optional[str]:
     try:
