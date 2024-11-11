@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 import threading
 import time
 import uuid
@@ -9,14 +10,14 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from loguru import logger
-from scapy.all import IP, TCP, UDP, Raw, sniff
+from scapy.all import IP, TCP, UDP, Raw, sniff, wrpcap
 from scapy.packet import Packet
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from src.constants import DEFAULT_INTERFACE, DEFAULT_PORT
-from src.models import PacketCaptureResultsTable, RequestsTable
-from src.utils import calc_throughput, is_private_ip
+from src.models import PacketCaptureRawData, PacketCaptureResultsTable, RequestsTable
+from src.utils import calc_throughput, is_private_ip, uncloseable
 
 
 @dataclass
@@ -106,22 +107,13 @@ class DNSPacketCapture:
 
     @staticmethod
     def get_full_packet_size(packet: Packet) -> int:
-        # Get the length of the IP layer
-        # ip_layer_len = packet[IP].len
-
-        # Initialize transport layer length
         transport_layer_len = 0
-
         # Check for TCP or UDP layer and get its length
-        if TCP in packet:
-            if Raw in packet:
-                transport_layer_len = len(packet[Raw].load)
-            else:
-                transport_layer_len = len(packet[TCP])
+        if TCP in packet and Raw in packet:
+            transport_layer_len = len(packet[Raw].load)
         elif UDP in packet:
             transport_layer_len = packet[UDP].len
 
-        # Return the sum of IP and transport layer lengths
         return transport_layer_len
 
     def capture_packets(self) -> None:
@@ -140,6 +132,8 @@ class DNSPacketCapture:
     def process_packet(self, packet: Packet) -> None:
         if not self.is_valid_packet(packet):
             return
+
+        # logger.info(f"{packet.show2(dump=True)}", pcap2=True)
 
         ip_layer = packet[IP]
         ip_src, ip_dst = ip_layer.src, ip_layer.dst
@@ -165,7 +159,7 @@ class DNSPacketCapture:
         self, transaction_key: Tuple[str, int, str, int], packet: Packet
     ) -> None:
         logger.info(f"Processing DNS request: {transaction_key}", pcap=True)
-        logger.info(f"Packet: {packet.show(dump=True)}", pcap=True)
+        # logger.info(f"Packet: {packet.show(dump=True)}", pcap=True)
 
         packet_info = PacketInfo(
             packet=packet,
@@ -187,7 +181,7 @@ class DNSPacketCapture:
         self, transaction_key: TransactionKey, packet: Packet
     ) -> None:
         logger.info(f"Processing DNS response: {transaction_key}", pcap=True)
-        logger.info(f"Packet: { packet.show(dump=True)}", pcap=True)
+        # logger.info(f"Packet: { packet.show(dump=True)}", pcap=True)
 
         packet_info = PacketInfo(
             packet=packet,
@@ -203,22 +197,69 @@ class DNSPacketCapture:
             packet_info=packet_info,
         )
 
+        self.reconcile_db_transcation_ids()
+
         logger.info(
             f"Captured DNS response: {transaction_key} : {transaction_uuid}", pcap=True
         )
 
+    def reconcile_db_transcation_ids(self) -> None:
+        """Function to reconcile Null transaction_uuids in the database, based on the formulated transaction_key"""
+
+        # get the null transaction_uuids from the db:
+        with Session(self.engine) as session:
+            results = (
+                session.query(PacketCaptureResultsTable)
+                .filter(PacketCaptureResultsTable.transaction_uuid.is_(None))
+                .all()
+            )
+
+            for result in results:
+                transaction_key = self.make_transaction_key(
+                    ip_src=result.src_ip,
+                    src_port=result.src_port,
+                    ip_dst=result.dst_ip,
+                    dst_port=result.dst_port,
+                )
+                reverse_transaction_key = self.make_reverse_transaction_key(
+                    ip_src=result.src_ip,
+                    src_port=result.src_port,
+                    ip_dst=result.dst_ip,
+                    dst_port=result.dst_port,
+                )
+
+                transaction_uuid = self.find_transaction_uuid(transaction_key)
+                transaction_uuid = (
+                    transaction_uuid
+                    if transaction_uuid is not None
+                    else self.find_transaction_uuid(reverse_transaction_key)
+                )
+
+                if transaction_uuid is not None:
+                    result.transaction_uuid = str(transaction_uuid)
+                    session.commit()
+
+                    logger.info(
+                        f"Reconciled transaction_uuid: {transaction_uuid} for transaction_key: {transaction_key}"
+                    )
+
     def write_to_db(
         self,
         transaction_key: TransactionKey,
-        transaction_uuid: uuid.UUID,
+        transaction_uuid: uuid.UUID | None,
         packet_info: PacketInfo,
     ):
         src_ip, src_port, dst_ip, dst_port = transaction_key
 
-        with Session(self.engine) as session:
+        packet_binary: bytes | None = None
 
+        with uncloseable(BytesIO()) as pcap_buffer:
+            wrpcap(pcap_buffer, [packet_info.packet])
+            packet_binary = pcap_buffer.getvalue()
+
+        with Session(self.engine) as session:
             packet_capture_result = PacketCaptureResultsTable(
-                transaction_uuid=str(transaction_uuid),
+                transaction_uuid=str(transaction_uuid) if transaction_uuid else None,
                 timestamp=int(packet_info.packet.time * 1.0e6),
                 size=self.get_full_packet_size(packet_info.packet),
                 src_ip=src_ip,
@@ -237,11 +278,20 @@ class DNSPacketCapture:
                     if packet_info.packet.sent_time is not None
                     else None
                 ),
-                raw_packet=packet_info.packet.json(),
             )
 
             session.add(packet_capture_result)
+            session.commit()
 
+            raw_data = PacketCaptureRawData(
+                packet_capture_result_id=packet_capture_result.id,
+                # transaction_uuid=str(transaction_uuid),
+                capture_time=datetime.fromtimestamp(packet_info.packet.time),
+                packet_json=packet_info.packet.json(),
+                packet_binary=packet_binary,
+            )
+
+            session.add(raw_data)
             session.commit()
 
             logger.success(

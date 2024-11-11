@@ -7,6 +7,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     case,
@@ -68,10 +69,11 @@ class PacketCaptureResultsTable(Base):
     __tablename__ = "packet_capture_results"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    transaction_uuid: Mapped[str] = mapped_column(
-        String(64), nullable=False, index=True
-    )
+
+    transaction_uuid: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
+
     timestamp: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
     size: Mapped[int] = mapped_column(Integer, nullable=False)
 
     src_ip: Mapped[str] = mapped_column(String(45))
@@ -89,7 +91,29 @@ class PacketCaptureResultsTable(Base):
     capture_time: Mapped[datetime] = mapped_column(DateTime)
     sent_time: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
-    raw_packet: Mapped[str] = mapped_column(JSON, nullable=True)
+    raw_data: Mapped["PacketCaptureRawData"] = relationship(
+        "PacketCaptureRawData", back_populates="capture_result"
+    )
+
+
+class PacketCaptureRawData(Base):
+    __tablename__ = 'packet_capture_raw_data'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    packet_capture_result_id: Mapped[int] = mapped_column(
+        ForeignKey('packet_capture_results.id'), nullable=False
+    )
+
+    capture_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    packet_json: Mapped[str] = mapped_column(JSON, nullable=True)
+    packet_binary: Mapped[bytes] = mapped_column(LargeBinary, nullable=True)
+
+    # Relationship to the results table
+    capture_result = relationship(
+        "PacketCaptureResultsTable", back_populates="raw_data"
+    )
 
 
 class RequestsTable(Base):

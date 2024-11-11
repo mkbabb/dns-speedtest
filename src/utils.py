@@ -1,3 +1,4 @@
+import contextlib
 import ipaddress
 import random
 import re
@@ -7,10 +8,13 @@ from dataclasses import dataclass
 from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Optional
+from typing import TypeVar
 
 from loguru import logger
 
 from src.constants import DEFAULT_CHUNK_FILEPATH, RECORD_SIZE
+
+T = TypeVar("T")
 
 
 class ChunkCache:
@@ -184,3 +188,14 @@ class DNSUrl:
         logger.debug(f"Byte length: {byte_len}, UID: {uid}, Domain: {domain}")
 
         return DNSUrl(byte_len=byte_len, uid=uid, domain=domain)
+
+
+@contextlib.contextmanager
+def uncloseable(fd: T) -> T:
+    """
+    Context manager which turns the fd's close operation to no-op for the duration of the context.
+    """
+    close = fd.close
+    fd.close = lambda: None
+    yield fd
+    fd.close = close

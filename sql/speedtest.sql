@@ -27,6 +27,7 @@ transaction_stats AS (
             CASE
                 WHEN rp.flags = 'PA'
                 OR rp.flags = 'SPA'
+                OR rp.flags = 'A'
                 AND rp.src_ip NOT LIKE '10.%' THEN rp.timestamp
             END
         ) AS first_pa_timestamp,
@@ -112,6 +113,7 @@ SELECT
     min_id AS original_id,
     transaction_uuid,
     packets_sent,
+    total_bytes,
     total_mb,
     rtt_seconds,
     total_duration_seconds,

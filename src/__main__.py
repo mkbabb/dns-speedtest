@@ -72,6 +72,14 @@ def main() -> None:
         level="INFO",
         filter=lambda record: record["extra"].get("pcap") == True,
     )
+    # pcap2
+    logger.add(
+        log_file_path.parent / "pcap2.log",
+        rotation="10 MB",
+        compression="zip",
+        level="INFO",
+        filter=lambda record: record["extra"].get("pcap2") == True,
+    )
 
     # Load configuration
     config = load_config(args.config)
