@@ -8,6 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
+import json
 
 from loguru import logger
 from scapy.all import IP, TCP, UDP, Raw, sniff, wrpcap
@@ -285,9 +286,8 @@ class DNSPacketCapture:
 
             raw_data = PacketCaptureRawData(
                 packet_capture_result_id=packet_capture_result.id,
-                # transaction_uuid=str(transaction_uuid),
                 capture_time=datetime.fromtimestamp(packet_info.packet.time),
-                packet_json=packet_info.packet.json(),
+                packet_json=json.loads(packet_info.packet.json()),
                 packet_binary=packet_binary,
             )
 

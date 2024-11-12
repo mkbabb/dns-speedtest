@@ -59,6 +59,7 @@ WHERE
 
     with engine.connect() as conn:
         result = conn.execute(query, {"uid": uid}).fetchone()
+
         return result._asdict() if result else None
 
 
@@ -105,7 +106,12 @@ ORDER BY
 
     with engine.connect() as conn:
         result = conn.execute(query, {"uid": uid}).fetchall()
-        return [row._asdict() for row in result] if result else None
+        if result is None:
+            return None
+
+        results = [row._asdict() for row in result]
+        # extract out only the packet_json field
+        return [json.loads(row['packet_json']) for row in results]
 
 
 def get_data_for_resource(
