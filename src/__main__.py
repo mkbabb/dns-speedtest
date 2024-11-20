@@ -7,7 +7,7 @@ from loguru import logger
 from sqlalchemy import URL, create_engine
 
 from src.models import Base
-from src.constants import CACHE_SIZE, DEFAULT_PORT
+from src.constants import CACHE_SIZE, DEFAULT_INTERFACE, DEFAULT_PORT
 from src.server.speedtest import run_server
 from src.utils import RECORD_SIZE
 import ipinfo
@@ -56,6 +56,13 @@ def main() -> None:
         default="./auth/config.toml",
         help="Path to the TOML configuration file",
     )
+    # add argument for interface:
+    parser.add_argument(
+        "--interface",
+        type=str,
+        default=DEFAULT_INTERFACE,
+        help="Interface to capture packets",
+    )
 
     args = parser.parse_args()
 
@@ -99,10 +106,11 @@ def main() -> None:
     )
 
     run_server(
-        port=args.port,
-        cache_size=CACHE_SIZE,
         engine=engine,
         ipinfo_handler=ipinfo_handler,
+        interface=args.interface,
+        port=args.port,
+        cache_size=CACHE_SIZE,
     )
 
 

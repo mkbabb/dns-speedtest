@@ -23,6 +23,7 @@ from src.constants import (
     MAX_TXT_CHUNK_SIZE,
     MINIMUM_TIME,
     NS_1_IP,
+    NS_2_IP,
     RECORD_SIZE,
     REFRESH_TIME,
     RETRY_TIME,
@@ -60,8 +61,16 @@ SOA_RECORD = SOA(
 NS_RECORDS = [NS(D["ns-1"])]
 
 RECORDS = {
-    D: [A(NS_1_IP), AAAA((0,) * 16), MX(D.mail), SOA_RECORD] + NS_RECORDS,
+    D: [
+        A(NS_1_IP),
+        A(NS_2_IP),
+        AAAA((0,) * 16),
+        MX(D.mail),
+        SOA_RECORD,
+    ]
+    + NS_RECORDS,
     D["ns-1"]: [A(NS_1_IP)],
+    D["ns-2"]: [A(NS_2_IP)],
     D.admin: [A(NS_1_IP)],
     D.mail: [A(NS_1_IP)],
 }
@@ -387,9 +396,9 @@ class SpeedtestDNSServer(DNSServer):
             handler=SpeedtestDNSHandler,
         )
 
-        self.server.engine = engine
-        self.server.ipinfo_handler = ipinfo_handler
-        self.server.packet_capture = packet_capture
+        self.server.engine = engine # type: ignore
+        self.server.ipinfo_handler = ipinfo_handler # type: ignore
+        self.server.packet_capture = packet_capture # type: ignore
 
 
 def run_server(
