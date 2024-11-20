@@ -7,8 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from functools import lru_cache, wraps
 from pathlib import Path
-from typing import Optional
-from typing import TypeVar
+from typing import Generator, Optional, TypeVar
 
 from loguru import logger
 
@@ -191,7 +190,7 @@ class DNSUrl:
 
 
 @contextlib.contextmanager
-def uncloseable(fd: T) -> T:
+def uncloseable(fd: T) -> Generator[T, None, None]:
     """
     Context manager which turns the fd's close operation to no-op for the duration of the context.
     """

@@ -2,6 +2,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -11,7 +12,6 @@ from sqlalchemy import (
     String,
     Text,
     case,
-    BigInteger,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -104,8 +104,6 @@ class PacketCaptureRawData(Base):
     packet_capture_result_id: Mapped[int] = mapped_column(
         ForeignKey('packet_capture_results.id'), nullable=False
     )
-
-    capture_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     packet_json: Mapped[str] = mapped_column(JSON, nullable=True)
     packet_binary: Mapped[bytes] = mapped_column(LargeBinary, nullable=True)

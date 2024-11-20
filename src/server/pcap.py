@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from io import BytesIO
+import datetime
+import json
 import threading
 import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
-import json
+from io import BytesIO
+from typing import Dict, Optional, Tuple
 
+from cachetools import TTLCache
 from loguru import logger
 from scapy.all import IP, TCP, UDP, Raw, sniff, wrpcap
 from scapy.packet import Packet
@@ -36,6 +37,13 @@ class DNSTransaction:
 TransactionKey = Tuple[str, int, str, int]
 
 
+UUID_CACHE_TTL = 60  # 60 seconds
+
+UUID_CACHE_SIZE = 1000
+
+UUID_TIMEDELTA = datetime.timedelta(seconds=1.25 * UUID_CACHE_TTL)
+
+
 class DNSPacketCapture:
     def __init__(
         self,
@@ -51,7 +59,10 @@ class DNSPacketCapture:
             DNSTransaction
         )
 
-        self.uuid_transactions: Dict[uuid.UUID, TransactionKey] = {}
+        # TTL-based cache to store transaction UUIDs
+        self.uuid_transactions: TTLCache[uuid.UUID, TransactionKey] = TTLCache(
+            maxsize=UUID_CACHE_SIZE, ttl=UUID_CACHE_TTL
+        )
 
         self.lock: threading.Lock = threading.Lock()
         self.stop_sniffing: threading.Event = threading.Event()
@@ -105,6 +116,16 @@ class DNSPacketCapture:
     @staticmethod
     def get_flags(packet: Packet) -> str:
         return packet.sprintf("%TCP.flags%") if TCP in packet else ""
+
+    @staticmethod
+    def get_protocol(packet: Packet) -> str:
+
+        if TCP in packet:
+            return "TCP"
+        elif UDP in packet:
+            return "UDP"
+        else:
+            return ""
 
     @staticmethod
     def get_full_packet_size(packet: Packet) -> int:
@@ -207,13 +228,18 @@ class DNSPacketCapture:
         )
 
     def reconcile_db_transcation_ids(self) -> None:
-        """Function to reconcile Null transaction_uuids in the database, based on the formulated transaction_key"""
+        """Function to reconcile null transaction_uuids in the database, based on the formulated transaction_key"""
 
-        # get the null transaction_uuids from the db:
+        # Get the null transaction_uuids from the db:
         with Session(self.engine) as session:
             results = (
                 session.query(PacketCaptureResultsTable)
                 .filter(PacketCaptureResultsTable.transaction_uuid.is_(None))
+                # Filter out timestamped packets older than the UUID time delta
+                .filter(
+                    PacketCaptureResultsTable.capture_time
+                    > datetime.datetime.now() - UUID_TIMEDELTA
+                )
                 .all()
             )
 
@@ -252,6 +278,9 @@ class DNSPacketCapture:
         transaction_uuid: uuid.UUID | None,
         packet_info: PacketInfo,
     ):
+        if packet_info.packet is None:
+            return
+
         src_ip, src_port, dst_ip, dst_port = transaction_key
 
         packet_binary: bytes | None = None
@@ -263,21 +292,22 @@ class DNSPacketCapture:
         with Session(self.engine) as session:
             packet_capture_result = PacketCaptureResultsTable(
                 transaction_uuid=str(transaction_uuid) if transaction_uuid else None,
+                # Timestamp in nanoseconds
                 timestamp=int(packet_info.packet.time * 1.0e6),
                 size=self.get_full_packet_size(packet_info.packet),
                 src_ip=src_ip,
                 src_port=src_port,
                 dst_ip=dst_ip,
                 dst_port=dst_port,
-                protocol="TCP" if TCP in packet_info.packet else "UDP",
+                protocol=self.get_protocol(packet_info.packet),
                 flags=self.get_flags(packet_info.packet),
                 sequence_number=self.get_sequence_number(packet_info.packet),
                 acknowledgment_number=self.get_acknowledgment_number(
                     packet_info.packet
                 ),
-                capture_time=datetime.fromtimestamp(packet_info.packet.time),
+                capture_time=datetime.datetime.fromtimestamp(packet_info.timestamp),
                 sent_time=(
-                    datetime.fromtimestamp(packet_info.packet.sent_time)
+                    datetime.datetime.fromtimestamp(packet_info.packet.sent_time)
                     if packet_info.packet.sent_time is not None
                     else None
                 ),
@@ -288,7 +318,6 @@ class DNSPacketCapture:
 
             raw_data = PacketCaptureRawData(
                 packet_capture_result_id=packet_capture_result.id,
-                capture_time=datetime.fromtimestamp(packet_info.packet.time),
                 packet_json=json.loads(packet_info.packet.json()),
                 packet_binary=packet_binary,
             )

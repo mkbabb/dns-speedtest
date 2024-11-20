@@ -1,3 +1,4 @@
+import ipaddress
 import time
 import uuid
 from datetime import datetime
@@ -10,7 +11,6 @@ from dnslib.server import BaseResolver
 from loguru import logger
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
-import ipaddress
 
 from src.constants import (
     CACHE_SIZE,
@@ -77,6 +77,7 @@ RECORDS = {
 
 
 NS_1_IP_V6 = ipv4_to_ipv6(NS_1_IP)
+NS_2_IP_V6 = ipv4_to_ipv6(NS_2_IP)
 
 
 class SpeedtestDNSHandler(DNSHandler):
@@ -398,9 +399,9 @@ class SpeedtestDNSServer(DNSServer):
             handler=SpeedtestDNSHandler,
         )
 
-        self.server.engine = engine # type: ignore
-        self.server.ipinfo_handler = ipinfo_handler # type: ignore
-        self.server.packet_capture = packet_capture # type: ignore
+        self.server.engine = engine  # type: ignore
+        self.server.ipinfo_handler = ipinfo_handler  # type: ignore
+        self.server.packet_capture = packet_capture  # type: ignore
 
 
 def run_server(
