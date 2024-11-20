@@ -137,7 +137,9 @@ class DNSPacketCapture:
         # logger.info(f"{packet.show2(dump=True)}", pcap2=True)
 
         ip_layer = packet[IP]
+
         ip_src, ip_dst = ip_layer.src, ip_layer.dst
+
         src_port, dst_port = self.get_ports(packet)
 
         transaction_key = self.make_transaction_key(

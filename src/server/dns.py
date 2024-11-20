@@ -206,6 +206,8 @@ class DNSHandler(socketserver.BaseRequestHandler):
         transaction_key = DNSPacketCapture.make_transaction_key(
             ip_src=self.client_address[0],
             src_port=self.client_address[1],
+            # The server address is not the correct destination address; it's always
+            # 0.0.0.0. Instead, use the interface IP address.
             # ip_dst=self.server.server_address[0],
             ip_dst=self.server.interface_ip,
             dst_port=self.server.server_address[1],
@@ -278,6 +280,7 @@ class DNSServer(object):
         resolver: BaseResolver,
         address: str = DEFAULT_ADDRESS,
         port: int = DEFAULT_PORT,
+        interface: str = DEFAULT_INTERFACE,
         tcp: bool = False,
         handler: type[DNSHandler] = DNSHandler,
         server: Optional[type[socketserver.BaseServer]] = None,
@@ -288,7 +291,7 @@ class DNSServer(object):
 
         self.server = server((address, port), handler)
         self.server.resolver = resolver
-        self.server.interface_ip = get_interface_ip(interface_name=DEFAULT_INTERFACE)
+        self.server.interface_ip = get_interface_ip(interface_name=interface)
 
         self.packet_capture = packet_capture
 

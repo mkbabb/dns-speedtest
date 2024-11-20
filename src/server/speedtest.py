@@ -376,6 +376,7 @@ class SpeedtestDNSServer(DNSServer):
         cache_size: int,
         address: str = "",
         port: int = DEFAULT_PORT,
+        interface: str = DEFAULT_INTERFACE,
         tcp: bool = False,
     ):
         chunk_cache = ChunkCache(
@@ -392,6 +393,7 @@ class SpeedtestDNSServer(DNSServer):
             resolver=resolver,
             address=address,
             port=port,
+            interface=interface,
             tcp=tcp,
             handler=SpeedtestDNSHandler,
         )
@@ -422,6 +424,7 @@ def run_server(
         ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
+        interface=interface,
         address="",
         tcp=False,
     )
@@ -432,6 +435,7 @@ def run_server(
         ipinfo_handler=ipinfo_handler,
         cache_size=cache_size,
         port=port,
+        interface=interface,
         address="",
         tcp=True,
     )
