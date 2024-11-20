@@ -17,7 +17,9 @@ DNS_TTL = 1
 # The domain name to use for the DNS server
 DOMAIN_NAME = "friday.institute."
 # The IP address of the DNS server
-NS_1_IP = "100.28.199.23"
+NS_1_IP = "152.26.6.53"
+# The IP address of the secondary DNS server
+NS_2_IP = "100.28.199.23"
 
 # Time in seconds for the refresh, retry, expire, and minimum fields of the SOA record
 # REFRESH_TIME = 60 * 60 * 1
