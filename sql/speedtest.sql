@@ -1,5 +1,5 @@
-CREATE
-OR REPLACE VIEW pcap_speedtest_data AS WITH ranked_packets AS (
+CREATE OR REPLACE VIEW pcap_speedtest_data AS 
+WITH ranked_packets AS (
     SELECT
         id,
         transaction_uuid,
@@ -9,12 +9,10 @@ OR REPLACE VIEW pcap_speedtest_data AS WITH ranked_packets AS (
         SIZE,
         ROW_NUMBER() OVER (
             PARTITION BY transaction_uuid
-            ORDER BY
-                TIMESTAMP
+            ORDER BY TIMESTAMP
         ) AS rn,
         LAG(id) OVER (
-            ORDER BY
-                id
+            ORDER BY id
         ) AS prev_id
     FROM
         packet_capture_results
@@ -28,7 +26,8 @@ transaction_stats AS (
                 WHEN rp.flags = 'PA'
                 OR rp.flags = 'SPA'
                 OR rp.flags = 'A'
-                AND rp.src_ip NOT LIKE '10.%' THEN rp.timestamp
+                AND (rp.src_ip NOT LIKE '10.%' AND rp.src_ip NOT LIKE '152.46.6.53%')
+                THEN rp.timestamp
             END
         ) AS first_pa_timestamp,
         MAX(
@@ -38,20 +37,22 @@ transaction_stats AS (
                     OR rp.flags = 'FPA'
                     OR rp.flags = 'A'
                 )
-                AND rp.src_ip NOT LIKE '10.%' THEN rp.timestamp
+                AND (rp.src_ip NOT LIKE '10.%' AND rp.src_ip NOT LIKE '152.46.6.53%')
+                THEN rp.timestamp
             END
         ) AS last_fa_timestamp,
         MIN(
             CASE
                 WHEN rp.flags = 'A'
-                AND rp.src_ip NOT LIKE '10.%' THEN (
+                AND (rp.src_ip NOT LIKE '10.%' AND rp.src_ip NOT LIKE '152.46.6.53%')
+                THEN (
                     SELECT
                         MAX(sa.timestamp)
                     FROM
                         packet_capture_results sa
                     WHERE
                         sa.flags = 'SA'
-                        AND sa.src_ip LIKE '10.%'
+                        AND (sa.src_ip LIKE '10.%' OR sa.src_ip LIKE '152.46.6.53%')
                         AND sa.id <= rp.prev_id
                 )
             END
@@ -59,18 +60,21 @@ transaction_stats AS (
         MIN(
             CASE
                 WHEN rp.flags = 'A'
-                AND rp.src_ip NOT LIKE '10.%' THEN rp.timestamp
+                AND (rp.src_ip NOT LIKE '10.%' AND rp.src_ip NOT LIKE '152.46.6.53%')
+                THEN rp.timestamp
             END
         ) AS first_a_timestamp,
         SUM(
             CASE
-                WHEN rp.src_ip LIKE '10.%' THEN rp.size
+                WHEN (rp.src_ip LIKE '10.%' OR rp.src_ip LIKE '152.46.6.53%')
+                THEN rp.size
                 ELSE 0
             END
         ) AS total_bytes,
         COUNT(
             CASE
-                WHEN rp.src_ip LIKE '10.%' THEN 1
+                WHEN (rp.src_ip LIKE '10.%' OR rp.src_ip LIKE '152.46.6.53%')
+                THEN 1
             END
         ) AS packets_sent
     FROM
@@ -129,4 +133,4 @@ WHERE
     first_pa_timestamp IS NOT NULL
     AND last_fa_timestamp IS NOT NULL
 ORDER BY
-    original_id ASC
+    original_id ASC;
