@@ -305,7 +305,7 @@ class DNSPacketCapture:
                 acknowledgment_number=self.get_acknowledgment_number(
                     packet_info.packet
                 ),
-                capture_time=datetime.datetime.fromtimestamp(packet_info.timestamp),
+                capture_time=datetime.datetime.fromtimestamp(packet_info.packet.time),
                 sent_time=(
                     datetime.datetime.fromtimestamp(packet_info.packet.sent_time)
                     if packet_info.packet.sent_time is not None
