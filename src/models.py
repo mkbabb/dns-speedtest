@@ -35,19 +35,6 @@ class DNSUrlsTable(Base):
     )
 
 
-class SpeedtestResultsTable(Base):
-    __tablename__ = "speedtest_results"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    request_id: Mapped[int] = mapped_column(ForeignKey("requests.id"))
-    request: Mapped["RequestsTable"] = relationship(
-        "RequestsTable", back_populates="speedtest_result"
-    )
-    # Latency in nanoseconds
-    latency: Mapped[float] = mapped_column(Float)
-    # Download speed in MB/s
-    throughput: Mapped[float] = mapped_column(Float)
-
-
 class IPInfoTable(Base):
     __tablename__ = "ipinfo"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -130,9 +117,6 @@ class RequestsTable(Base):
 
     dns_url: Mapped["DNSUrlsTable"] = relationship(
         "DNSUrlsTable", back_populates="request"
-    )
-    speedtest_result: Mapped["SpeedtestResultsTable"] = relationship(
-        "SpeedtestResultsTable", back_populates="request", uselist=False
     )
     ipinfo: Mapped["IPInfoTable"] = relationship(
         "IPInfoTable", back_populates="request", uselist=False

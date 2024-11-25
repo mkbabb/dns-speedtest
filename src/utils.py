@@ -79,16 +79,6 @@ def clamp(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(value, max_value))
 
 
-def calc_throughput(latency: float, byte_len: int) -> float:
-    """Calculate the download speed in MB/s.
-
-    Args:
-        latency (float): The latency in nanoseconds
-        byte_len (int): The amount of bytes downloaded
-    """
-    return byte_len / (latency * 1e-9) / 1e6
-
-
 @lru_cache
 def is_private_ip(ip: str) -> bool:
     try:
@@ -139,11 +129,11 @@ class DNSUrl:
 
     byte_len   = digit+, "_"
 
-    uid           = \w+, "_"
+    uid           = \\w+, "_"
 
-    top_level_domain = \w{2,}
+    top_level_domain = \\w{2,}
 
-    subdomain     = \w+
+    subdomain     = \\w+
 
     domain        = subdomain, (".", subdomain)*, ".", top_level_domain
     """
@@ -207,82 +197,159 @@ def uncloseable(fd: T) -> Generator[T, None, None]:
 
 
 class PacketEncoder(json.JSONEncoder):
+    """Custom JSON encoder for handling network packet data types."""
+
     def default(self, obj: Any) -> Any:
+        # Convert bytes to UTF-8 or hex if UTF-8 fails
         if isinstance(obj, bytes):
             try:
                 return obj.decode('utf-8')
             except UnicodeDecodeError:
                 return binascii.hexlify(obj).decode('ascii')
+        # Convert datetime to ISO format
         if isinstance(obj, datetime):
             return obj.isoformat()
+        # Convert sets to lists for JSON serialization
         if isinstance(obj, (set, frozenset)):
             return list(obj)
+
         return super().default(obj)
 
 
-def get_flag_strings(packet: Packet, layer_type: str | None) -> str:
-    flag_formats = {
-        'TCP': '%TCP.flags%',
-        'IP': '%IP.flags%',
-        'ICMP': '%ICMP.type%',
-        'DNS': '%DNS.qr%',
+def get_protocol_fields(layer_type: str) -> dict[str, str]:
+    """Return sprintf format strings for protocol-specific fields."""
+    protocol_fields = {
+        'TCP': {
+            'flags': '%TCP.flags%',  # TCP flags (SYN, ACK, etc.)
+            'options': '%TCP.options%',  # TCP options
+            'window': '%TCP.window%',  # Window size
+        },
+        'IP': {
+            'flags': '%IP.flags%',  # IP flags (DF, MF)
+            'tos': '%IP.tos%',  # Type of Service
+            'frag': '%IP.frag%',  # Fragmentation offset
+        },
+        'ICMP': {
+            'type': '%ICMP.type%',  # ICMP message type
+            'code': '%ICMP.code%',  # ICMP message code
+        },
+        'DNS': {
+            'qr': '%DNS.qr%',  # Query/Response flag
+            'opcode': '%DNS.opcode%',  # Operation code
+            'aa': '%DNS.aa%',  # Authoritative Answer
+            'tc': '%DNS.tc%',  # Truncation flag
+            'rd': '%DNS.rd%',  # Recursion Desired
+            'ra': '%DNS.ra%',  # Recursion Available
+            'z': '%DNS.z%',  # Reserved field
+            'rcode': '%DNS.rcode%',  # Response code
+            'qtype': '%DNS.qtype%',  # Query type
+            'qclass': '%DNS.qclass%',  # Query class
+        },
     }
+    return protocol_fields.get(layer_type, {})
 
-    if layer_type is not None and layer_type in packet:
-        return packet.sprintf(flag_formats[layer_type])
 
-    return ""
+def get_layer_fields(packet: Packet, layer_type: str) -> dict[str, Any]:
+    """Extract protocol-specific fields using sprintf formatting."""
+    field_dict = {}
+    if not hasattr(packet, layer_type):
+        return field_dict
+
+    layer = getattr(packet, layer_type)
+
+    protocol_fields = get_protocol_fields(layer_type)
+
+    for field_name, sprintf_format in protocol_fields.items():
+        try:
+            field_value = packet.sprintf(sprintf_format)
+            if field_value != "??":  # Skip invalid/undefined fields
+                field_dict[field_name] = field_value
+        except Exception:
+            continue
+
+    return field_dict
+
+
+def process_layer(
+    current_layer: Packet, packet: Packet, include_raw: bool, stringify_flags: bool
+) -> tuple[dict, dict]:
+    """Process individual packet layer, extracting fields and raw data."""
+    layer_name = current_layer.name
+    layer_dict = {}
+    raw_dict = {}
+
+    # Include raw layer data if requested
+    if include_raw:
+        raw_dict = {
+            'raw': binascii.hexlify(bytes(current_layer)).decode('ascii'),
+            'length': len(current_layer),
+        }
+
+    # Process layer fields
+    for field_name, field_value in current_layer.fields.items():
+        if field_name.startswith('_'):  # Skip private fields
+            continue
+
+        layer_dict[field_name] = str(field_value)
+
+    # Add protocol-specific formatted fields
+    if stringify_flags:
+        layer_dict.update(get_layer_fields(packet, layer_name))
+
+    # Layer-specific processing
+    if isinstance(current_layer, IP):
+        layer_dict['total_length'] = len(current_layer)
+        if include_raw:
+            layer_dict['header_length'] = current_layer.ihl * 4  # IHL * 4 bytes
+            layer_dict['payload_length'] = len(current_layer.payload)
+
+    elif isinstance(current_layer, (TCP, UDP)):
+        layer_dict['sport'] = current_layer.sport
+        layer_dict['dport'] = current_layer.dport
+        if include_raw:
+            # UDP header = 8 bytes, TCP header = data offset * 4 bytes
+            layer_dict['header_length'] = (
+                8 if isinstance(current_layer, UDP) else (current_layer.dataofs * 4)
+            )
+            layer_dict['payload_length'] = len(current_layer.payload)
+            if hasattr(current_layer, 'load'):
+                layer_dict['load'] = (
+                    binascii.hexlify(current_layer.load).decode('ascii')
+                    if isinstance(current_layer.load, bytes)
+                    else current_layer.load
+                )
+
+    elif isinstance(current_layer, HTTP):
+        if hasattr(current_layer, 'Headers'):
+            layer_dict['headers'] = dict(current_layer.Headers)
+
+    return layer_dict, raw_dict
 
 
 def packet_to_dict(
     packet: Packet, include_raw: bool = False, stringify_flags: bool = True
 ) -> dict[str, Any]:
-    result: dict = {
+    """Convert packet to dictionary with optional raw data inclusion."""
+    result = {
         'summary': packet.summary(),
         'time': getattr(packet, 'time', None),
         'layers': {},
+        'raw_layers': {} if include_raw else {},
     }
 
+    # Process each layer recursively
     current_layer = packet
     while current_layer:
+        layer_dict, raw_dict = process_layer(
+            current_layer, packet, include_raw, stringify_flags
+        )
+
         layer_name = current_layer.name
-        layer_dict = {}
-
-        for field_name, field_value in current_layer.fields.items():
-            if field_name.startswith('_'):
-                continue
-
-            if isinstance(field_value, (bytes, bytearray)):
-                try:
-                    field_value = field_value.decode('utf-8')
-                except UnicodeDecodeError:
-                    if include_raw:
-                        field_value = binascii.hexlify(field_value).decode('ascii')
-                    else:
-                        field_value = f"<{len(field_value)} bytes>"
-
-            if stringify_flags:
-                if field_name == 'flags':
-                    field_value = get_flag_strings(packet, layer_name)
-                elif field_name == 'type' and layer_name == 'ICMP':
-                    field_value = get_flag_strings(packet, 'ICMP')
-                elif field_name in ('qr', 'opcode', 'rcode') and layer_name == 'DNS':
-                    field_value = packet.sprintf(f"%DNS.{field_name}%")
-
-            layer_dict[field_name] = field_value
-
-        if isinstance(current_layer, IP):
-            layer_dict['total_length'] = len(current_layer)
-        elif isinstance(current_layer, (TCP, UDP)):
-            layer_dict['sport'] = current_layer.sport
-            layer_dict['dport'] = current_layer.dport
-        elif isinstance(current_layer, HTTP):
-            if hasattr(current_layer, 'Headers'):
-                layer_dict['headers'] = dict(current_layer.Headers)
-
         result['layers'][layer_name] = layer_dict
+        if include_raw:
+            result['raw_layers'][layer_name] = raw_dict
 
-        current_layer = current_layer.payload if current_layer.payload else None  # type: ignore
+        current_layer = current_layer.payload if current_layer.payload else None
 
     return result
 
@@ -295,6 +362,7 @@ def packet_to_json(
     sort_keys: bool = False,
     **kwargs: Any,
 ) -> str:
+    """Convert packet to JSON string with customizable formatting options."""
     try:
         packet_dict = packet_to_dict(packet, include_raw, stringify_flags)
         return json.dumps(

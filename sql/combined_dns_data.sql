@@ -11,10 +11,7 @@ SELECT
     r.start_time AS request_start_time,
     r.end_time AS request_end_time,
     r.ip AS request_ip,
-    s.id AS speedtest_id,
-    s.latency AS speedtest_latency,
-    COALESCE(psd.mb_per_second, s.throughput) AS speedtest_dl_speed,
-    -- Convert MB/s to Mbps
+    psd.mb_per_second AS speedtest_dl_speed,
     i.ip_address AS ip_info_address,
     i.location AS ip_info_location,
     i.org AS ip_info_org,
@@ -33,10 +30,6 @@ SELECT
     p.size AS packet_capture_response_size,
     CAST(p.timestamp AS FLOAT) / 1e9 AS packet_capture_latency,
     CASE
-        WHEN s.id IS NOT NULL THEN 'Yes'
-        ELSE 'No'
-    END AS has_speedtest_result,
-    CASE
         WHEN i.id IS NOT NULL THEN 'Yes'
         ELSE 'No'
     END AS has_ip_info,
@@ -47,7 +40,6 @@ SELECT
 FROM
     dns_urls d
     LEFT JOIN requests r ON d.id = r.dns_url_id
-    LEFT JOIN speedtest_results s ON r.id = s.request_id
     LEFT JOIN ipinfo i ON r.ipinfo_id = i.id
     LEFT JOIN packet_capture_results p ON r.transaction_uuid = p.transaction_uuid
     LEFT JOIN pcap_speedtest_data psd ON p.transaction_uuid = psd.transaction_uuid;

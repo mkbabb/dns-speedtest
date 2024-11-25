@@ -28,10 +28,10 @@ from src.constants import (
     REFRESH_TIME,
     RETRY_TIME,
 )
-from src.models import DNSUrlsTable, IPInfoTable, RequestsTable, SpeedtestResultsTable
+from src.models import DNSUrlsTable, IPInfoTable, RequestsTable
 from src.server.dns import BaseResolver, DNSHandler, DNSServer
 from src.server.pcap import DNSPacketCapture
-from src.utils import ChunkCache, DNSUrl, calc_throughput, ipv4_to_ipv6
+from src.utils import ChunkCache, DNSUrl, ipv4_to_ipv6
 
 
 class DomainName(str):
@@ -366,20 +366,36 @@ class SpeedTestResolver(BaseResolver):
 
     def add_edns0(self, request: DNSRecord, reply: DNSRecord):
         """
-        Adds EDNS0 OPT record to the reply.
+        Adds EDNS0 OPT record to the reply if the request contains one.
+        Properly handles EDNS options and preserves request parameters.
         """
-        # Unconditionally add an OPT record to the reply
-        reply.add_ar(
-            RR(
-                rname=".",
-                # OPT record has type 41 for EDNS0
-                rtype=QTYPE.OPT,
-                # Set the UDP payload size to 4096 bytes
-                rclass=4096,
-                ttl=DNS_TTL,
-                rdata=b"\x00\x00\x00\x00",
+        # Check if request has an OPT record
+        opt_records = [r for r in request.ar if r.rtype == QTYPE.OPT]
+
+        if opt_records:
+            # Get the first OPT record from request
+            request_opt = opt_records[0]
+            # Add OPT record to reply with same parameters
+            reply.add_ar(
+                RR(
+                    rname=".",
+                    rtype=QTYPE.OPT,
+                    rclass=request_opt.rclass,  # Preserve UDP payload size
+                    ttl=request_opt.ttl,  # Preserve flags and version
+                    rdata=request_opt.rdata,  # Preserve EDNS options
+                )
             )
-        )
+        else:
+            # If no OPT in request, add default OPT record
+            reply.add_ar(
+                RR(
+                    rname=".",
+                    rtype=QTYPE.OPT,
+                    rclass=4096,  # Default UDP payload size
+                    ttl=0,  # No flags or version
+                    rdata=b"",  # No EDNS options
+                )
+            )
 
 
 class SpeedtestDNSServer(DNSServer):

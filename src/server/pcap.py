@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from src.constants import DEFAULT_INTERFACE, DEFAULT_PORT
 from src.models import PacketCaptureRawData, PacketCaptureResultsTable
-from src.utils import calc_throughput, is_private_ip, packet_to_json, uncloseable
+from src.utils import is_private_ip, packet_to_json, uncloseable
 
 
 @dataclass
@@ -67,6 +67,7 @@ class DNSPacketCapture:
         )
 
         self.lock: threading.Lock = threading.Lock()
+
         self.stop_sniffing: threading.Event = threading.Event()
 
     @staticmethod
@@ -104,7 +105,11 @@ class DNSPacketCapture:
 
     @staticmethod
     def is_valid_packet(packet: Packet) -> bool:
-        return IP in packet and (TCP in packet or UDP in packet)
+        is_tcp_ip = IP in packet and (TCP in packet or UDP in packet)
+
+        is_private = is_private_ip(packet[IP].src) and is_private_ip(packet[IP].dst)
+
+        return is_tcp_ip and not is_private
 
     @staticmethod
     def get_ports(packet: Packet) -> Tuple[int, int]:
@@ -144,9 +149,21 @@ class DNSPacketCapture:
             f"Starting packet capture on interface {self.interface}, port {self.port}"
         )
 
+        # Filter for only port self.port;
+        # Ignore exclusively local traffic and 8.8.8.8 and 1.1.1.1
+        filter = f"""
+            port {self.port}
+            and not (src net 8.8.8.8 or dst net 8.8.8.8
+                or src host 1.1.1.1 or dst host 1.1.1.1
+                or (src net 127.0.0.0/8 and dst net 127.0.0.0/8)
+                or (src net 10.0.0.0/8 and dst net 10.0.0.0/8)
+                or (src net 172.16.0.0/12 and dst net 172.16.0.0/12)
+                or (src net 192.168.0.0/16 and dst net 192.168.0.0/16))
+        """
+
         sniff(
             iface=self.interface,
-            filter=f"port {self.port}",
+            filter=filter,
             prn=self.process_packet,
             stop_filter=lambda _: self.stop_sniffing.is_set(),
             store=0,
@@ -284,7 +301,8 @@ class DNSPacketCapture:
 
         packet: Packet = packet_info.packet
 
-        logger.debug(f"{packet.show2()}", pacp2=True)
+        dump = packet.show(dump=True)
+        logger.info(f"{dump}", pcap2=True)
 
         with uncloseable(BytesIO()) as pcap_buffer:
             wrpcap(pcap_buffer, [packet])
@@ -294,18 +312,15 @@ class DNSPacketCapture:
             packet_capture_result = PacketCaptureResultsTable(
                 transaction_uuid=str(transaction_uuid) if transaction_uuid else None,
                 # Timestamp in nanoseconds
-                timestamp=int(packet.time) * 1e6,
+                timestamp=packet.time * 1.0e6,
                 size=self.get_full_packet_size(packet),
-
+                # Source and destination IP and port
                 src_ip=src_ip,
                 src_port=src_port,
-
                 dst_ip=dst_ip,
                 dst_port=dst_port,
-
                 protocol=self.get_protocol(packet),
                 flags=self.get_flags(packet),
-                
                 sequence_number=self.get_sequence_number(packet),
                 acknowledgment_number=self.get_acknowledgment_number(packet),
                 capture_time=datetime.datetime.fromtimestamp(float(packet.time)),
