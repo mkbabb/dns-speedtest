@@ -63,14 +63,14 @@ NS_RECORDS = [NS(D["ns-1"])]
 RECORDS = {
     D: [
         A(NS_1_IP),
-        A(NS_2_IP),
+        # A(NS_2_IP),
         AAAA((0,) * 16),
         MX(D.mail),
         SOA_RECORD,
     ]
     + NS_RECORDS,
     D["ns-1"]: [A(NS_1_IP)],
-    D["ns-2"]: [A(NS_2_IP)],
+    # D["ns-2"]: [A(NS_2_IP)],
     D.admin: [A(NS_1_IP)],
     D.mail: [A(NS_1_IP)],
 }
@@ -159,6 +159,10 @@ class SpeedtestDNSHandler(DNSHandler):
 
         with Session(self.server.engine) as session:
             request_table_obj = session.get(RequestsTable, self.request_id)
+
+            if request_table_obj is None:
+                logger.error("Request table object not found")
+                return
             request_table_obj.end_time = end_time
 
             session.commit()
@@ -235,7 +239,7 @@ class SpeedTestResolver(BaseResolver):
         else:
             self.handle_unsupported_query(reply=reply, qt=qt)
 
-        self.add_edns0_if_requested(request=request, reply=reply)
+        self.add_edns0(request=request, reply=reply)
 
         return reply
 
@@ -360,12 +364,22 @@ class SpeedTestResolver(BaseResolver):
             RR(rname=D, rtype=QTYPE.SOA, rclass=1, ttl=DNS_TTL, rdata=SOA_RECORD)
         )
 
-    def add_edns0_if_requested(self, request: DNSRecord, reply: DNSRecord):
+    def add_edns0(self, request: DNSRecord, reply: DNSRecord):
         """
-        Adds EDNS0 OPT record to the reply if it was present in the request.
+        Adds EDNS0 OPT record to the reply.
         """
-        if request.ar and request.ar[0].rtype == QTYPE.OPT:
-            reply.add_ar(request.ar[0])
+        # Unconditionally add an OPT record to the reply
+        reply.add_ar(
+            RR(
+                rname=".",
+                # OPT record has type 41 for EDNS0
+                rtype=QTYPE.OPT,
+                # Set the UDP payload size to 4096 bytes
+                rclass=4096,
+                ttl=DNS_TTL,
+                rdata=b"\x00\x00\x00\x00",
+            )
+        )
 
 
 class SpeedtestDNSServer(DNSServer):

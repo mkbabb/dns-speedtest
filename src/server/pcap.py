@@ -12,25 +12,27 @@ from typing import Dict, Optional, Tuple
 
 from cachetools import TTLCache
 from loguru import logger
-from scapy.all import IP, TCP, UDP, Raw, sniff, wrpcap
-from scapy.packet import Packet
+from scapy.layers.inet import IP, TCP, UDP
+from scapy.packet import Packet, Raw
+from scapy.sendrecv import sniff
+from scapy.utils import wrpcap
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from src.constants import DEFAULT_INTERFACE, DEFAULT_PORT
-from src.models import PacketCaptureRawData, PacketCaptureResultsTable, RequestsTable
-from src.utils import calc_throughput, is_private_ip, uncloseable
+from src.models import PacketCaptureRawData, PacketCaptureResultsTable
+from src.utils import calc_throughput, is_private_ip, packet_to_json, uncloseable
 
 
 @dataclass
 class PacketInfo:
     timestamp: int
-    packet: Optional[Packet] = None
+    packet: Packet | None = None
 
 
 @dataclass
 class DNSTransaction:
-    uuid: uuid.UUID = None
+    uuid: uuid.UUID | None = None
     transactions: list[PacketInfo] = field(default_factory=list)
 
 
@@ -47,7 +49,7 @@ UUID_TIMEDELTA = datetime.timedelta(seconds=1.25 * UUID_CACHE_TTL)
 class DNSPacketCapture:
     def __init__(
         self,
-        engine: Engine = None,
+        engine: Engine | None = None,
         interface: str = DEFAULT_INTERFACE,
         port: int = DEFAULT_PORT,
     ):
@@ -119,7 +121,6 @@ class DNSPacketCapture:
 
     @staticmethod
     def get_protocol(packet: Packet) -> str:
-
         if TCP in packet:
             return "TCP"
         elif UDP in packet:
@@ -155,8 +156,6 @@ class DNSPacketCapture:
         if not self.is_valid_packet(packet):
             return
 
-        # logger.info(f"{packet.show2(dump=True)}", pcap2=True)
-
         ip_layer = packet[IP]
 
         ip_src, ip_dst = ip_layer.src, ip_layer.dst
@@ -183,7 +182,6 @@ class DNSPacketCapture:
         self, transaction_key: Tuple[str, int, str, int], packet: Packet
     ) -> None:
         logger.info(f"Processing DNS request: {transaction_key}", pcap=True)
-        # logger.info(f"Packet: {packet.show(dump=True)}", pcap=True)
 
         packet_info = PacketInfo(
             packet=packet,
@@ -205,7 +203,6 @@ class DNSPacketCapture:
         self, transaction_key: TransactionKey, packet: Packet
     ) -> None:
         logger.info(f"Processing DNS response: {transaction_key}", pcap=True)
-        # logger.info(f"Packet: { packet.show(dump=True)}", pcap=True)
 
         packet_info = PacketInfo(
             packet=packet,
@@ -285,30 +282,36 @@ class DNSPacketCapture:
 
         packet_binary: bytes | None = None
 
+        packet: Packet = packet_info.packet
+
+        logger.debug(f"{packet.show2()}", pacp2=True)
+
         with uncloseable(BytesIO()) as pcap_buffer:
-            wrpcap(pcap_buffer, [packet_info.packet])
+            wrpcap(pcap_buffer, [packet])
             packet_binary = pcap_buffer.getvalue()
 
         with Session(self.engine) as session:
             packet_capture_result = PacketCaptureResultsTable(
                 transaction_uuid=str(transaction_uuid) if transaction_uuid else None,
                 # Timestamp in nanoseconds
-                timestamp=int(packet_info.packet.time * 1.0e6),
-                size=self.get_full_packet_size(packet_info.packet),
+                timestamp=int(packet.time) * 1e6,
+                size=self.get_full_packet_size(packet),
+
                 src_ip=src_ip,
                 src_port=src_port,
+
                 dst_ip=dst_ip,
                 dst_port=dst_port,
-                protocol=self.get_protocol(packet_info.packet),
-                flags=self.get_flags(packet_info.packet),
-                sequence_number=self.get_sequence_number(packet_info.packet),
-                acknowledgment_number=self.get_acknowledgment_number(
-                    packet_info.packet
-                ),
-                capture_time=datetime.datetime.fromtimestamp(packet_info.packet.time),
+
+                protocol=self.get_protocol(packet),
+                flags=self.get_flags(packet),
+                
+                sequence_number=self.get_sequence_number(packet),
+                acknowledgment_number=self.get_acknowledgment_number(packet),
+                capture_time=datetime.datetime.fromtimestamp(float(packet.time)),
                 sent_time=(
-                    datetime.datetime.fromtimestamp(packet_info.packet.sent_time)
-                    if packet_info.packet.sent_time is not None
+                    datetime.datetime.fromtimestamp(float(packet.sent_time))
+                    if packet.sent_time is not None
                     else None
                 ),
             )
@@ -318,7 +321,15 @@ class DNSPacketCapture:
 
             raw_data = PacketCaptureRawData(
                 packet_capture_result_id=packet_capture_result.id,
-                packet_json=json.loads(packet_info.packet.json()),
+                packet_json=json.loads(
+                    packet_to_json(
+                        packet,
+                        include_raw=False,
+                        indent=None,
+                        sort_keys=True,
+                        stringify_flags=True,
+                    )
+                ),
                 packet_binary=packet_binary,
             )
 

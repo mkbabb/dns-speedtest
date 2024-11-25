@@ -1,15 +1,21 @@
+import binascii
 import contextlib
 import ipaddress
+import json
 import random
 import re
 import string
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache, wraps
 from pathlib import Path
-from typing import Generator, Optional, TypeVar
+from typing import Any, Generator, TypeVar
 
 from loguru import logger
+from scapy.layers.http import HTTP
+from scapy.layers.inet import IP, TCP, UDP
+from scapy.packet import Packet
 
 from src.constants import DEFAULT_CHUNK_FILEPATH, RECORD_SIZE
 
@@ -99,7 +105,7 @@ def ipv4_to_ipv6(ip: str | int | ipaddress.IPv4Address | ipaddress.IPv6Address) 
 
 
 @lru_cache
-def get_interface_ip(interface_name: str) -> Optional[str]:
+def get_interface_ip(interface_name: str) -> str | None:
     try:
         # Run the ip addr show command for the specified interface
         result = subprocess.run(
@@ -194,7 +200,105 @@ def uncloseable(fd: T) -> Generator[T, None, None]:
     """
     Context manager which turns the fd's close operation to no-op for the duration of the context.
     """
-    close = fd.close
-    fd.close = lambda: None
-    yield fd
-    fd.close = close
+    close = fd.close  # type: ignore
+    fd.close = lambda: None  # type: ignore
+    yield fd  # type: ignore
+    fd.close = close  # type: ignore
+
+
+class PacketEncoder(json.JSONEncoder):
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, bytes):
+            try:
+                return obj.decode('utf-8')
+            except UnicodeDecodeError:
+                return binascii.hexlify(obj).decode('ascii')
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, (set, frozenset)):
+            return list(obj)
+        return super().default(obj)
+
+
+def get_flag_strings(packet: Packet, layer_type: str | None) -> str:
+    flag_formats = {
+        'TCP': '%TCP.flags%',
+        'IP': '%IP.flags%',
+        'ICMP': '%ICMP.type%',
+        'DNS': '%DNS.qr%',
+    }
+
+    if layer_type is not None and layer_type in packet:
+        return packet.sprintf(flag_formats[layer_type])
+
+    return ""
+
+
+def packet_to_dict(
+    packet: Packet, include_raw: bool = False, stringify_flags: bool = True
+) -> dict[str, Any]:
+    result: dict = {
+        'summary': packet.summary(),
+        'time': getattr(packet, 'time', None),
+        'layers': {},
+    }
+
+    current_layer = packet
+    while current_layer:
+        layer_name = current_layer.name
+        layer_dict = {}
+
+        for field_name, field_value in current_layer.fields.items():
+            if field_name.startswith('_'):
+                continue
+
+            if isinstance(field_value, (bytes, bytearray)):
+                try:
+                    field_value = field_value.decode('utf-8')
+                except UnicodeDecodeError:
+                    if include_raw:
+                        field_value = binascii.hexlify(field_value).decode('ascii')
+                    else:
+                        field_value = f"<{len(field_value)} bytes>"
+
+            if stringify_flags:
+                if field_name == 'flags':
+                    field_value = get_flag_strings(packet, layer_name)
+                elif field_name == 'type' and layer_name == 'ICMP':
+                    field_value = get_flag_strings(packet, 'ICMP')
+                elif field_name in ('qr', 'opcode', 'rcode') and layer_name == 'DNS':
+                    field_value = packet.sprintf(f"%DNS.{field_name}%")
+
+            layer_dict[field_name] = field_value
+
+        if isinstance(current_layer, IP):
+            layer_dict['total_length'] = len(current_layer)
+        elif isinstance(current_layer, (TCP, UDP)):
+            layer_dict['sport'] = current_layer.sport
+            layer_dict['dport'] = current_layer.dport
+        elif isinstance(current_layer, HTTP):
+            if hasattr(current_layer, 'Headers'):
+                layer_dict['headers'] = dict(current_layer.Headers)
+
+        result['layers'][layer_name] = layer_dict
+
+        current_layer = current_layer.payload if current_layer.payload else None  # type: ignore
+
+    return result
+
+
+def packet_to_json(
+    packet: Packet,
+    include_raw: bool = False,
+    stringify_flags: bool = True,
+    indent: int | None = None,
+    sort_keys: bool = False,
+    **kwargs: Any,
+) -> str:
+    try:
+        packet_dict = packet_to_dict(packet, include_raw, stringify_flags)
+        return json.dumps(
+            packet_dict, cls=PacketEncoder, indent=indent, sort_keys=sort_keys, **kwargs
+        )
+    except Exception as e:
+        raise ValueError(f"Failed to convert packet to JSON: {str(e)}") from e
